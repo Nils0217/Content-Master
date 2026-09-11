@@ -156,7 +156,7 @@ def step6_hotdata_metrics(published: dict[str, Any], channel: str) -> dict[str, 
                 "conversions": real["repost_count"],
                 "ctr": round(real["like_count"] / impressions, 4),
             }
-            audit.log_event("bluesky", "metrics.pulled", uri=published["bluesky_uri"], **real)
+            audit.log_event("bluesky", "metrics.pulled", **real)  # real already has "uri"
         except BlueskyAPIError as e:
             print(f"[warn] Could not pull Bluesky metrics ({e}); falling back to simulated reading.")
 
