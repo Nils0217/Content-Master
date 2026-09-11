@@ -8,12 +8,14 @@ Run with: python run_pipeline.py --whitepaper "Marketing hack white paper.pdf"
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 from typing import Any
 
 from . import audit
 from .bluesky_client import BlueskyAPIError, BlueskyClient, BlueskyConfigError
 from .cognee_client import CogneeClient
+from .config import CogneeSettings
 from .hotdata_client import HotdataClient
 from .human_loop import review_draft
 from .hydradb_client import HydraDBClient
@@ -24,9 +26,22 @@ from .rocketride_client import RocketRide
 SUCCESS_CTR_THRESHOLD = 0.02  # click-through rate above this counts as a "win" for Modiqo
 
 
-def step1_cognee_extract(whitepaper_path: str, dataset_label: str) -> dict[str, Any]:
-    """Cognee: ECL pipeline over the raw whitepaper."""
-    cognee = CogneeClient()
+def _dataset_slug(product_name: str) -> str:
+    """Each product gets its own Cognee dataset so runs for different
+    products/whitepapers never cross-contaminate each other's knowledge
+    graph — search() only ever sees what was ingested for *this* product.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", product_name.lower()).strip("-")
+    return slug or "automarketer"
+
+
+def step1_cognee_extract(whitepaper_path: str, dataset_label: str, product_name: str) -> str:
+    """Cognee: ECL pipeline over the raw whitepaper. Returns the extracted
+    context text (or "" if Cognee had nothing to say) — this is what makes
+    step3's drafts actually grounded in the uploaded document instead of
+    generic boilerplate.
+    """
+    cognee = CogneeClient(CogneeSettings(dataset=_dataset_slug(product_name)))
     audit.log_event("cognee", "add.start", file=whitepaper_path)
     cognee.add_document(whitepaper_path, labels=dataset_label)
     audit.log_event("cognee", "add.done")
@@ -38,7 +53,13 @@ def step1_cognee_extract(whitepaper_path: str, dataset_label: str) -> dict[str, 
     audit.log_event("cognee", "search.start", query="product name, key features, target ICP")
     result = cognee.search("What is the product's name, its key features, and its target ICP?")
     audit.log_event("cognee", "search.done")
-    return result
+
+    # result shape: [{"search_result": ["free text..."], ...}, ...]
+    for entry in result or []:
+        for text in entry.get("search_result", []):
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+    return ""
 
 
 def step2_hydradb_persist(product_name: str, features: list[str], icp: str) -> None:
@@ -53,10 +74,16 @@ def step2_hydradb_persist(product_name: str, features: list[str], icp: str) -> N
                      n_features=len(features), icp=icp)
 
 
-def step3_rocketride_or_replay(product_name: str, features: list[str], channel: str) -> list[dict[str, Any]]:
+def step3_rocketride_or_replay(
+    product_name: str, features: list[str], channel: str, context: str = ""
+) -> list[dict[str, Any]]:
     """RocketRide generates drafts — unless Modiqo already has a winning play
     for this (product, channel), in which case we replay it directly and
     skip generation entirely. This is the visible "run #2 is cheaper" proof.
+
+    `context` (Cognee's real extraction from the uploaded document, if any)
+    is what lets RocketRide.draft_posts() ground the copy in the actual
+    source material instead of the generic feature-name template.
     """
     play = find_play(product_name, channel)
     if play:
@@ -65,8 +92,9 @@ def step3_rocketride_or_replay(product_name: str, features: list[str], channel: 
         return [{"id": "replayed", "channel": channel, "text": play["winning_text"], "status": "draft"}]
 
     rr = RocketRide()
-    audit.log_event("rocketride", "draft.start", product=product_name, channel=channel)
-    drafts = rr.draft_posts({"name": product_name, "features": features}, channel)
+    audit.log_event("rocketride", "draft.start", product=product_name, channel=channel,
+                     grounded=bool(context))
+    drafts = rr.draft_posts({"name": product_name, "features": features}, channel, context=context)
     audit.log_event("rocketride", "draft.done", n=len(drafts))
     return drafts
 
@@ -175,8 +203,11 @@ def run(whitepaper_path: str, channel: str = "x", product_name: str | None = Non
     # LLM key isn't configured yet on the Cognee container — see README.)
     product_name = product_name or Path(whitepaper_path).stem
     features = features or ["compound memory", "muscle-memory replay", "human-in-the-loop safety"]
+    context = ""
     try:
-        step1_cognee_extract(whitepaper_path, dataset_label="whitepaper")
+        context = step1_cognee_extract(whitepaper_path, dataset_label="whitepaper", product_name=product_name)
+        if not context:
+            print("[warn] Cognee returned no extracted text; continuing with supplied product info.")
     except Exception as e:  # noqa: BLE001 — surfaced to the operator, pipeline continues
         audit.log_event("cognee", "extract.failed", error=str(e))
         print(f"[warn] Cognee extraction failed ({e}); continuing with supplied product info.")
@@ -184,8 +215,9 @@ def run(whitepaper_path: str, channel: str = "x", product_name: str | None = Non
     # Step 2: HydraDB
     step2_hydradb_persist(product_name, features, icp)
 
-    # Step 3: RocketRide (or Modiqo replay)
-    drafts = step3_rocketride_or_replay(product_name, features, channel)
+    # Step 3: RocketRide (or Modiqo replay) — grounded in Cognee's real
+    # extraction when available, so drafts reflect the uploaded document.
+    drafts = step3_rocketride_or_replay(product_name, features, channel, context=context)
 
     # Steps 4-7: human review -> publish -> hotdata -> Modiqo, per draft
     for draft in drafts:

@@ -37,9 +37,24 @@ class CogneeClient:
         return {"Authorization": f"Bearer {self._login()}"}
 
     # -- ECL pipeline: Extract, Cognify, Load ---------------------------
+
+    # Cognee's server-side loaders don't cover every extension (no docling/
+    # unstructured installed on this container — see scripts/configure_cognee_llm.sh).
+    # Rather than require every demo document to be a pdf/txt/md, convert
+    # known unsupported formats to plain text client-side and route through
+    # add_raw_texts() instead of a file upload.
     def add_document(self, file_path: str | Path, labels: str | None = None) -> dict[str, Any]:
-        """Extract: upload a raw file (e.g. the whitepaper PDF) into a dataset."""
+        """Extract: upload a raw file (e.g. the whitepaper PDF) into a dataset.
+        Falls back to text-extraction + add_raw_texts() for formats Cognee's
+        server has no loader for (currently: .rtf).
+        """
         file_path = Path(file_path)
+        if file_path.suffix.lower() == ".rtf":
+            from striprtf.striprtf import rtf_to_text
+
+            text = rtf_to_text(file_path.read_text(errors="replace"))
+            return self.add_raw_texts([text], labels=labels)
+
         with file_path.open("rb") as fh:
             files = {"data": (file_path.name, fh, "application/octet-stream")}
             data = {"datasetName": self.cfg.dataset, "run_in_background": "false"}

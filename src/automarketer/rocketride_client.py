@@ -14,12 +14,18 @@ pipeline exists.
 """
 from __future__ import annotations
 
+import json
+import os
 import uuid
 from typing import Any
 
+import requests
 from rocketride import RocketRideClient
 
 from .config import RocketRideSettings, settings
+
+_LLM_ENDPOINT = os.environ.get("LLM_IMPROVE_ENDPOINT", "http://localhost:11434/v1/chat/completions")
+_LLM_MODEL = os.environ.get("LLM_IMPROVE_MODEL", "llama3.2:3b")
 
 
 class RocketRide:
@@ -35,11 +41,24 @@ class RocketRide:
         async with RocketRideClient(uri=self.cfg.uri, auth=self.cfg.api_key) as c:
             return await c.use(filepath=filepath, args=[f"{k}={v}" for k, v in params.items()])
 
-    def draft_posts(self, product: dict[str, Any], channel: str, n: int = 3) -> list[dict[str, Any]]:
+    def draft_posts(
+        self, product: dict[str, Any], channel: str, n: int = 3, context: str = ""
+    ) -> list[dict[str, Any]]:
         """Local stand-in for a RocketRide content-generation pipe: turns the
         Cognee/HydraDB product graph into N draft posts for one channel.
+
+        `context` is Cognee's actual extracted text about the source
+        document (see pipeline.py step1_cognee_extract) — when present this
+        calls the local LLM to write posts grounded in that real content.
+        Without it (Cognee down, or no context passed), falls back to the
+        old fixed-template generator so the rest of the loop never breaks.
         """
         name = product.get("name", "the product")
+        if context.strip():
+            drafts = self._llm_draft_posts(name, channel, n, context)
+            if drafts:
+                return drafts
+
         features = product.get("features", [])
         drafts = []
         for i in range(n):
@@ -51,5 +70,40 @@ class RocketRide:
                     "text": f"{name} — {feature}. Built for teams who ship fast. #{channel}",
                     "status": "draft",
                 }
+            )
+        return drafts
+
+    def _llm_draft_posts(self, name: str, channel: str, n: int, context: str) -> list[dict[str, Any]] | None:
+        """Ask the local LLM for N posts grounded in Cognee's extracted
+        content. Returns None on any failure so the caller can fall back —
+        never raises.
+        """
+        prompt = (
+            f"Here is what we know about a product called '{name}', extracted from its "
+            f"source document:\n\n{context.strip()[:3000]}\n\n"
+            f"Write {n} distinct, short marketing posts for {channel} (under 280 characters "
+            "each) that reference concrete facts from the text above. Do not invent claims "
+            "not supported by the text. Reply with exactly one post per line, no numbering, "
+            "no extra commentary."
+        )
+        try:
+            resp = requests.post(
+                _LLM_ENDPOINT,
+                json={"model": _LLM_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.7},
+                timeout=90,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+        except (requests.RequestException, KeyError, IndexError, json.JSONDecodeError):
+            return None
+
+        lines = [line.strip("-* \t") for line in content.splitlines() if line.strip()]
+        if not lines:
+            return None
+        drafts = []
+        for i in range(n):
+            text = lines[i % len(lines)]
+            drafts.append(
+                {"id": f"draft-{uuid.uuid4().hex[:8]}", "channel": channel, "text": text, "status": "draft"}
             )
         return drafts

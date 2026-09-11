@@ -134,12 +134,13 @@ pipeline further.
 
 ## What's still simulated (be upfront about this if a judge asks)
 
-- `step5_publish()` simulates posting instead of calling a real social
-  platform API — wiring a real one needs a specific platform + explicit
-  go-ahead (outward-facing action).
-- hotdata's underlying engagement numbers are simulated (no live posted
-  campaign yet to pull real clicks from) — but the storage/query round trip
-  through hotdata.dev itself is 100% real, not mocked.
+- `step5_publish()` posts for real on `--channel bluesky` (gated by the
+  human_loop approval); every other channel still simulates — no adapter
+  wired for X/LinkedIn/etc. yet.
+- hotdata's underlying engagement numbers are simulated except when a real
+  Bluesky post exists (then step6 pulls real like/repost/reply counts) —
+  the storage/query round trip through hotdata.dev itself is 100% real
+  either way, not mocked.
 
 ## Known rough edges / next steps
 
@@ -159,8 +160,22 @@ pipeline further.
    `step3_rocketride_or_replay()` still calls the local `draft_posts()`
    stand-in rather than this `.pipe` — wire `RocketRide.run_pipe()` in
    when ready to switch over.
-4. Promote a proven `plays/*.json` into a released Rote play:
+4. **Fixed (was a real bug):** `step1_cognee_extract()`'s return value used
+   to be silently dropped in `run()` — every draft was generated from the
+   fixed fallback feature list, never from what Cognee actually extracted
+   from the uploaded document. Also: `.rtf` files 500'd (no server-side
+   loader installed) and every run shared one `automarketer` Cognee
+   dataset, so a second run's search results bled into the first's. Fixed
+   all three: `.rtf` gets converted client-side (`striprtf`) and ingested
+   via `add_raw_texts()`; each product now gets its own Cognee dataset
+   (`pipeline._dataset_slug()`); the extracted text is threaded through to
+   `RocketRide.draft_posts(..., context=...)`, which calls the local LLM
+   to write posts grounded in it (falls back to the old template if Cognee
+   has nothing). Verified against `Demo-white paper/cat.rtf` — drafts now
+   reference the document's actual content ("environmental enrichment",
+   "mutual trust", "Play, feeding, and interaction"), not generic copy.
+5. Promote a proven `plays/*.json` into a released Rote play:
    `rote play pending save automarketer` → inspect the emitted
    `rote play template create ...` command → QA → `rote play release`.
-5. Go post "ready & warmed up" in the hackathon Discord (Rote's own
+6. Go post "ready & warmed up" in the hackathon Discord (Rote's own
    checklist item — manual, needs your Discord login).
