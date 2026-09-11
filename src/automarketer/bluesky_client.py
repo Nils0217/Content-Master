@@ -142,3 +142,46 @@ class BlueskyClient:
                 )
             )
         return posts
+
+    # -- publish + pull-back (real posting layer) --------------------------
+    def publish_post(self, text: str) -> dict[str, Any]:
+        """Post to this account's own timeline for real. Called only after a
+        human has approved the draft (see human_loop.review_draft) — never
+        call this on unreviewed text.
+        """
+        if len(text) > 300:
+            raise ValueError(f"Bluesky posts are capped at 300 characters, got {len(text)}")
+        client = self._get_client()
+        try:
+            result = client.post(text=text)
+        except RateLimitExceededError as e:
+            raise BlueskyRateLimitError("Bluesky rate limit hit while posting. Wait and retry.") from e
+        except NetworkError as e:
+            raise BlueskyAPIError(f"Network error reaching Bluesky: {e}") from e
+        except AtProtocolError as e:
+            raise BlueskyAPIError(f"Bluesky API error while posting: {e}") from e
+        return {"uri": result.uri, "cid": result.cid}
+
+    def get_post_metrics(self, uri: str) -> dict[str, Any]:
+        """Pull real engagement back for a post this account made (or any
+        public post uri). Freshly-posted content will usually read 0s —
+        that's a real number, not a bug.
+        """
+        client = self._get_client()
+        try:
+            response = client.get_posts([uri])
+        except RateLimitExceededError as e:
+            raise BlueskyRateLimitError("Bluesky rate limit hit while fetching post metrics. Wait and retry.") from e
+        except NetworkError as e:
+            raise BlueskyAPIError(f"Network error reaching Bluesky: {e}") from e
+        except AtProtocolError as e:
+            raise BlueskyAPIError(f"Bluesky API error while fetching post metrics: {e}") from e
+        if not response.posts:
+            raise BlueskyAPIError(f"Post not found (may still be indexing): {uri}")
+        post = response.posts[0]
+        return {
+            "uri": uri,
+            "like_count": post.like_count or 0,
+            "repost_count": post.repost_count or 0,
+            "reply_count": post.reply_count or 0,
+        }

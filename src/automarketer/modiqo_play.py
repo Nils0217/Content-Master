@@ -48,6 +48,7 @@ def capture_success(
     winning_text: str,
     metrics: dict[str, Any],
     reviewer_note: str = "",
+    improvement_note: str = "",
 ) -> dict[str, Any]:
     """Persist the winning (product, channel) -> text pattern, bumping a run counter."""
     PLAYS_DIR.mkdir(parents=True, exist_ok=True)
@@ -62,6 +63,7 @@ def capture_success(
             "winning_text": winning_text,
             "last_metrics": metrics,
             "reviewer_note": reviewer_note,
+            "improvement_note": improvement_note,
             "runs": play["runs"] + 1,
         }
     )
@@ -71,13 +73,19 @@ def capture_success(
     return play
 
 
-def capture_failure(product_name: str, channel: str, text: str, reason: str) -> None:
+def capture_failure(product_name: str, channel: str, text: str, reason: str, improvement_note: str = "") -> None:
     """Failed / rejected runs are logged separately as improvement samples
     (white paper §3, step 7) rather than polluting the muscle-memory file.
     """
     PLAYS_DIR.mkdir(parents=True, exist_ok=True)
     fails_path = PLAYS_DIR / "_failures.jsonl"
-    record = {"product": product_name, "channel": channel, "text": text, "reason": reason}
+    record = {
+        "product": product_name,
+        "channel": channel,
+        "text": text,
+        "reason": reason,
+        "improvement_note": improvement_note,
+    }
     with fails_path.open("a") as fh:
         fh.write(json.dumps(record) + "\n")
 
