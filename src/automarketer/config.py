@@ -60,11 +60,24 @@ class HotdataSettings:
 
 
 @dataclass(frozen=True)
+class BlueskySettings:
+    handle: str = field(default_factory=lambda: os.environ.get("BLUESKY_HANDLE", ""))
+    # repr=False: keeps the app password out of any accidental print(settings)/
+    # repr(settings) or unhandled-exception traceback that includes locals.
+    app_password: str = field(default_factory=lambda: os.environ.get("BLUESKY_APP_PASSWORD", ""), repr=False)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.handle and self.app_password)
+
+
+@dataclass(frozen=True)
 class Settings:
     cognee: CogneeSettings = field(default_factory=CogneeSettings)
     hydradb: HydraDBSettings = field(default_factory=HydraDBSettings)
     rocketride: RocketRideSettings = field(default_factory=RocketRideSettings)
     hotdata: HotdataSettings = field(default_factory=HotdataSettings)
+    bluesky: BlueskySettings = field(default_factory=BlueskySettings)
     project_root: Path = PROJECT_ROOT
 
 

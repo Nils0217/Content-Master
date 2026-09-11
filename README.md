@@ -18,6 +18,34 @@ All six sponsor tools are **live and verified**, not stubbed:
 | Muscle memory | Modiqo.ai (Rote) | ✅ CLI logged in, hackathon warm-up play passed, local workspace `automarketer` registers each successful run. |
 | Security | Snyk | ✅ CLI authenticated. `snyk test` (deps): 0 vulnerabilities. `snyk code test` (source): caught a LOW path-traversal pattern in `config.py`, fixed by resolving+confining the path to the project root. |
 
+## Bluesky integration (extra data source)
+
+Fetches public Bluesky posts (official `atproto` SDK, app-password auth) and
+feeds them into the same Cognee ingestion pipeline the whitepaper goes
+through — a second real input to the knowledge graph, not a separate system.
+
+```bash
+# 1. connection test only
+./.venv/bin/python scripts/verify_bluesky.py
+
+# 2. + fetch public posts + ingest into Cognee
+./.venv/bin/python scripts/verify_bluesky.py --search "AI agents" --limit 3
+```
+
+Requires `BLUESKY_HANDLE` and `BLUESKY_APP_PASSWORD` (an **app password**
+from bsky.app → Settings → App Passwords, not your account password) in the
+environment or `.env` (see `env.example`) — never hardcoded, never logged.
+`src/automarketer/bluesky_client.py` maps `atproto`'s exceptions to clear
+`BlueskyConfigError` / `BlueskyAuthError` / `BlueskyRateLimitError` /
+`BlueskyAPIError` types so missing creds, bad auth, and rate limits each
+fail with a distinct, readable message instead of a raw traceback.
+
+Verified live: auth succeeded, 3 real posts fetched, and
+`CogneeClient.add_raw_texts()` accepted them
+(`status: PipelineRunCompleted`) — same `/api/v1/add` endpoint
+`add_document()` already used for the PDF, just called with `raw_data`
+strings instead of a file.
+
 ## Run it
 
 ```bash
@@ -55,9 +83,11 @@ run_pipeline.py               # CLI entrypoint
 scripts/
   configure_cognee_llm.sh     # (re)start Cognee wired to Ollama
   start_hydradb.sh            # start the local HydraDB graph-node
+  verify_bluesky.py           # Bluesky connection test + fetch + Cognee ingest
 src/automarketer/
   config.py                   # loads .env into typed settings
   cognee_client.py             # layer 1
+  bluesky_client.py             # extra data source -> feeds layer 1's ingest
   hydradb_client.py            # layer 2 (+ OpenCypher subset notes)
   hotdata_client.py            # layer 3 (real CLI writes + queries)
   rocketride_client.py         # layer 4

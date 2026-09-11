@@ -55,6 +55,26 @@ class CogneeClient:
         resp.raise_for_status()
         return resp.json()
 
+    def add_raw_texts(self, texts: list[str], labels: str | None = None) -> dict[str, Any]:
+        """Extract: ingest raw text strings (no file) into the dataset — same
+        /api/v1/add endpoint as add_document, via its `raw_data` field.
+        Used by the Bluesky integration to feed fetched posts into the same
+        ingestion pipeline the whitepaper PDF goes through.
+        """
+        data: dict[str, Any] = {"datasetName": self.cfg.dataset, "run_in_background": "false", "raw_data": texts}
+        if labels:
+            # Cognee requires one label per item (comma-separated), not one shared label.
+            data["labels"] = ",".join([labels] * len(texts))
+        resp = requests.post(
+            f"{self.cfg.base_url}/api/v1/add",
+            headers=self._headers(),
+            files={},  # multipart/form-data with no file parts — raw_data only
+            data=data,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def cognify(self, run_in_background: bool = False) -> dict[str, Any]:
         """Cognify: build the knowledge graph (entities + relationships) for the dataset."""
         resp = requests.post(
