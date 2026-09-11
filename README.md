@@ -14,7 +14,7 @@ All six sponsor tools are **live and verified**, not stubbed:
 | Memory construction | Cognee.ai | ✅ Self-hosted Docker, LLM = local Ollama (`llama3.2:3b`) + `nomic-embed-text` — no external API key, works offline. `add()`→`cognify()` on the real whitepaper PDF completes in ~90s and produces a real graph/summary. |
 | Memory storage | HydraDB | ✅ Local graph-node (Docker). Writes/reads verified via real Cypher; data persists to `hydradb-data/store`. |
 | Live query/analytics | hotdata.dev | ✅ CLI authenticated, workspace "marketing hack", instant database `automarketer` with table `automarketer.public.post_metrics`. Every simulated publish appends a real row (`databases load --append`) and reads it back with a real `hotdata query`. |
-| Orchestration/motion | RocketRide.ai | ✅ `pipelines/automarketer-content-gen.pipe` is a real, hand-authored pipeline (Webhook → RocketRide Wave agent [tools: Cognee + HydraDB, LLM: local Ollama, memory: internal] → Guardrails → response) — validated against the RocketRide VS Code/Cursor extension's own schema docs and **actually run** via the SDK: `client.use()` + `client.send()` returned `completedCount: 1, failedCount: 0`. Only warning is the expected missing HydraDB Cloud API key (see below). |
+| Orchestration/motion | RocketRide.ai | ✅ `pipelines/automarketer-content-gen.pipe` is a real, hand-authored pipeline (Webhook → RocketRide Wave agent [tools: Cognee + HydraDB, LLM: local Ollama, memory: internal] → Guardrails → response) — validated against the RocketRide VS Code/Cursor extension's own schema docs and **actually run** via the SDK: `client.use()` + `client.send()` returned `completedCount: 1, failedCount: 0, warnings: [], errors: []` — real HydraDB Cloud database (`default-tenant`) wired in too. |
 | Muscle memory | Modiqo.ai (Rote) | ✅ CLI logged in, hackathon warm-up play passed, local workspace `automarketer` registers each successful run. |
 | Security | Snyk | ✅ CLI authenticated. `snyk test` (deps): 0 vulnerabilities. `snyk code test` (source): caught a LOW path-traversal pattern in `config.py`, fixed by resolving+confining the path to the project root. |
 
@@ -91,8 +91,12 @@ approach kept missing connector hit-targets). Instead:
    supported, documented way to build one, not a hack).
 5. Ran it for real: `client.use(filepath=...)` → `client.send(token, ...)`
    → `client.get_task_status(token)` showed `completedCount: 1,
-   failedCount: 0`, with the one expected warning being the missing
-   HydraDB Cloud key.
+   failedCount: 0`. Once a real HydraDB Cloud database + API key were
+   added to `.env` (workspace already existed: database `default-tenant`,
+   found at dashboard.hydradb.com/databases), a re-run with the old
+   pipeline instance `terminate()`'d first came back with **zero warnings,
+   zero errors** — all five sponsor tools genuinely load-bearing in one
+   pipeline.
 
 `pipelines/services-catalog-reference.json` (gitignored — regenerate with
 `client.get_services()`) has the full catalog if you want to extend the
@@ -117,14 +121,14 @@ pipeline further.
    swap `LLM_MODEL` in `.env` for a hosted model (OpenAI/Anthropic — see
    `scripts/configure_cognee_llm.sh`) if quality matters more than staying
    fully offline.
-3. `pipelines/automarketer-content-gen.pipe`'s `db_hydradb` node needs a
-   real **HydraDB Cloud** database + API key (it's a managed-service node,
-   not our local self-hosted graph-node) — fill in
-   `ROCKETRIDE_HYDRADB_API_KEY`/`ROCKETRIDE_HYDRADB_DATABASE` in `.env` once
-   you have one. Everything else in the pipeline runs without it.
-   `pipeline.py`'s `step3_rocketride_or_replay()` still calls the local
-   `draft_posts()` stand-in rather than this `.pipe` — wire
-   `RocketRide.run_pipe()` in when ready to switch over.
+3. ~~`db_hydradb` needs a real HydraDB Cloud database + API key~~ — done
+   (`.env` has both; database `default-tenant`). Note this is a
+   **separate** HydraDB from the local self-hosted graph-node the rest of
+   the project uses directly via `hydradb_client.py` — two different
+   HydraDB instances, both real. `pipeline.py`'s
+   `step3_rocketride_or_replay()` still calls the local `draft_posts()`
+   stand-in rather than this `.pipe` — wire `RocketRide.run_pipe()` in
+   when ready to switch over.
 4. Promote a proven `plays/*.json` into a released Rote play:
    `rote play pending save automarketer` → inspect the emitted
    `rote play template create ...` command → QA → `rote play release`.
