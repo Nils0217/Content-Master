@@ -1,0 +1,236 @@
+{
+  "components": [
+    {
+      "id": "webhook_1",
+      "provider": "webhook",
+      "config": {
+        "hideForm": true,
+        "type": "webhook",
+        "mode": "Source",
+        "parameters": {}
+      },
+      "ui": {
+        "position": {
+          "x": 20,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        },
+        "nodeType": "default",
+        "formDataValid": true
+      }
+    },
+    {
+      "id": "agent_rocketride_1",
+      "provider": "agent_rocketride",
+      "config": {
+        "agent_description": "Generates on-brand marketing post drafts for a product, using the Cognee knowledge graph (product/ICP/features) and the HydraDB memory graph (past campaign outcomes) as grounding context.",
+        "instructions": [
+          "You are AutoMarketer.ai's drafting agent. Given a product name, channel, and target ICP in the incoming question, recall relevant product facts from Cognee and past campaign performance from HydraDB before writing.",
+          "Write concise, channel-appropriate marketing copy grounded in what the tools return. Do not invent product claims that aren't supported by the retrieved context.",
+          "Store a short summary of what you generated in memory under the campaign's key so repeat runs for the same product/channel can build on prior context."
+        ],
+        "max_waves": 10,
+        "require_tool_call": false
+      },
+      "input": [
+        {
+          "lane": "questions",
+          "from": "webhook_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 240,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 86
+        },
+        "nodeType": "default",
+        "formDataValid": true
+      }
+    },
+    {
+      "id": "guardrails_1",
+      "provider": "guardrails",
+      "config": {
+        "profile": "basic",
+        "basic": {
+          "policy_mode": "warn"
+        }
+      },
+      "input": [
+        {
+          "lane": "answers",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 460,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        },
+        "nodeType": "default",
+        "formDataValid": true
+      }
+    },
+    {
+      "id": "response_answers_1",
+      "provider": "response_answers",
+      "config": {
+        "laneName": "answers"
+      },
+      "input": [
+        {
+          "lane": "answers",
+          "from": "guardrails_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 680,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        },
+        "nodeType": "default",
+        "formDataValid": true
+      }
+    },
+    {
+      "id": "llm_ollama_1",
+      "provider": "llm_ollama",
+      "config": {
+        "profile": "custom",
+        "custom": {
+          "model": "llama3.2:3b",
+          "modelTotalTokens": 131072,
+          "serverbase": "http://localhost:11434/v1"
+        }
+      },
+      "control": [
+        {
+          "classType": "llm",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 130,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        },
+        "nodeType": "default",
+        "formDataValid": true
+      }
+    },
+    {
+      "id": "memory_internal_1",
+      "provider": "memory_internal",
+      "config": {
+        "type": "memory_internal"
+      },
+      "control": [
+        {
+          "classType": "memory",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 300,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        },
+        "nodeType": "default",
+        "formDataValid": true
+      }
+    },
+    {
+      "id": "tool_cognee_1",
+      "provider": "tool_cognee",
+      "config": {
+        "type": "tool_cognee",
+        "base_url": "${ROCKETRIDE_COGNEE_URL}",
+        "api_key": "${ROCKETRIDE_COGNEE_API_KEY}",
+        "dataset": "automarketer",
+        "allow_dataset_override": false,
+        "search_type": "GRAPH_COMPLETION_DECOMPOSITION",
+        "top_k": 15,
+        "request_timeout": 120
+      },
+      "control": [
+        {
+          "classType": "tool",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 470,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 40
+        },
+        "nodeType": "default",
+        "formDataValid": true
+      }
+    },
+    {
+      "id": "db_hydradb_1",
+      "provider": "db_hydradb",
+      "config": {
+        "profile": "default",
+        "default": {
+          "api_key": "${ROCKETRIDE_HYDRADB_API_KEY}",
+          "database": "${ROCKETRIDE_HYDRADB_DATABASE}",
+          "collection": "automarketer",
+          "max_results": 10
+        }
+      },
+      "control": [
+        {
+          "classType": "tool",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 640,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 40
+        },
+        "nodeType": "default",
+        "formDataValid": true
+      }
+    }
+  ],
+  "project_id": "f1a18fc9-6d4d-40d4-943a-d9bc1024d3b0",
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  },
+  "version": 1
+}

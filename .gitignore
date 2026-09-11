@@ -7,3 +7,5 @@ hydradb-data/store/
 hydradb-data/cache/
 plays/*.json
 plays/_failures.jsonl
+.rocketride/
+pipelines/services-catalog-reference.json
