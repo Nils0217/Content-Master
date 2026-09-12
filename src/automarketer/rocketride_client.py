@@ -98,6 +98,13 @@ class RocketRide:
             return None
 
         lines = [line.strip("-* \t") for line in content.splitlines() if line.strip()]
+        # Small local models often ignore "no extra commentary" and add a
+        # one-line preamble ("Here are N posts:") before the real content —
+        # drop lines that look like a header/preamble rather than a post.
+        lines = [
+            line for line in lines
+            if not (line.endswith(":") or line.lower().startswith(("here are", "here's", "sure,", "certainly")))
+        ]
         if not lines:
             return None
         drafts = []

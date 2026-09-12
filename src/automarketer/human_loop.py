@@ -11,6 +11,13 @@ from dataclasses import dataclass
 from typing import Any
 
 
+class ReviewInterrupted(Exception):
+    """Raised when stdin closes (Ctrl+D) or the user hits Ctrl+C mid-review —
+    lets the pipeline stop cleanly and still print a summary of whatever was
+    already processed, instead of an unhandled traceback.
+    """
+
+
 @dataclass
 class ReviewDecision:
     approved: bool
@@ -32,12 +39,15 @@ def review_draft(draft: dict[str, Any], context: dict[str, Any] | None = None) -
     print(draft["text"])
     print("=" * 60)
 
-    choice = input("[a]pprove / [e]dit / [r]eject > ").strip().lower()
-    if choice.startswith("e"):
-        new_text = input("New text: ").strip() or draft["text"]
-        note = input("Why the edit? (for Modiqo's learning signal): ").strip()
-        return ReviewDecision(approved=True, final_text=new_text, edited=True, reviewer_note=note)
-    if choice.startswith("a"):
-        return ReviewDecision(approved=True, final_text=draft["text"], edited=False)
-    note = input("Why rejected?: ").strip()
-    return ReviewDecision(approved=False, final_text=draft["text"], edited=False, reviewer_note=note)
+    try:
+        choice = input("[a]pprove / [e]dit / [r]eject > ").strip().lower()
+        if choice.startswith("e"):
+            new_text = input("New text: ").strip() or draft["text"]
+            note = input("Why the edit? (for Modiqo's learning signal): ").strip()
+            return ReviewDecision(approved=True, final_text=new_text, edited=True, reviewer_note=note)
+        if choice.startswith("a"):
+            return ReviewDecision(approved=True, final_text=draft["text"], edited=False)
+        note = input("Why rejected?: ").strip()
+        return ReviewDecision(approved=False, final_text=draft["text"], edited=False, reviewer_note=note)
+    except (EOFError, KeyboardInterrupt) as e:
+        raise ReviewInterrupted("Review interrupted (stdin closed or Ctrl+C)") from e

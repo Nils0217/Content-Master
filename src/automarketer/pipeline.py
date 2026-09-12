@@ -15,9 +15,9 @@ from typing import Any
 from . import audit
 from .bluesky_client import BlueskyAPIError, BlueskyClient, BlueskyConfigError
 from .cognee_client import CogneeClient
-from .config import CogneeSettings
+from .config import CogneeSettings, settings
 from .hotdata_client import HotdataClient
-from .human_loop import review_draft
+from .human_loop import ReviewInterrupted, review_draft
 from .hydradb_client import HydraDBClient
 from .improve import generate_improvement_note
 from .modiqo_play import capture_failure, capture_success, find_play
@@ -220,17 +220,55 @@ def run(whitepaper_path: str, channel: str = "x", product_name: str | None = Non
     drafts = step3_rocketride_or_replay(product_name, features, channel, context=context)
 
     # Steps 4-7: human review -> publish -> hotdata -> Modiqo, per draft
-    for draft in drafts:
-        decision = step4_human_review(draft)
+    results: list[dict[str, Any]] = []
+    for i, draft in enumerate(drafts, start=1):
+        print(f"\n########## Draft {i} of {len(drafts)} ##########")
+        try:
+            decision = step4_human_review(draft)
+        except ReviewInterrupted:
+            print(f"\n[stopped] Review interrupted at draft {i} of {len(drafts)} — "
+                  f"{len(drafts) - i} remaining draft(s) skipped.")
+            break
         if not decision.approved:
             capture_failure(product_name, channel, draft["text"], decision.reviewer_note or "rejected")
+            results.append({"draft": i, "status": "rejected", "text": draft["text"]})
             continue
         published = step5_publish(draft, decision.final_text)
         metrics = step6_hotdata_metrics(published, channel)
         step7_modiqo_capture(product_name, channel, decision.final_text, metrics,
                               approved=True, reviewer_note=decision.reviewer_note)
+        results.append({
+            "draft": i,
+            "status": published["status"],
+            "text": decision.final_text,
+            "bluesky_uri": published.get("bluesky_uri"),
+            "metrics": metrics,
+        })
 
     audit.log_event("pipeline", "run.done")
+    _print_run_summary(results)
+
+
+def _print_run_summary(results: list[dict[str, Any]]) -> None:
+    """Prints a clear end-of-run report so it's obvious the pipeline
+    finished (rather than looking hung) and where to see real feedback.
+    """
+    print("\n" + "=" * 60)
+    print(f"PIPELINE FINISHED — {len(results)} draft(s) processed")
+    print("=" * 60)
+    for r in results:
+        print(f"\nDraft {r['draft']}: {r['status']}")
+        print(f"  text: {r['text'][:100]}")
+        if r.get("bluesky_uri"):
+            post_id = r["bluesky_uri"].rsplit("/", 1)[-1]
+            handle = settings.bluesky.handle or "<handle>"
+            print(f"  view live: https://bsky.app/profile/{handle}/post/{post_id}")
+        if r.get("metrics"):
+            m = r["metrics"]
+            print(f"  feedback: {m.get('clicks', 0)} likes-equivalent, "
+                  f"{m.get('conversions', 0)} reposts-equivalent, ctr={m.get('ctr')} "
+                  f"(source: {m.get('source')})")
+    print()
 
 
 def main() -> None:
