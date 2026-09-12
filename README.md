@@ -1,5 +1,13 @@
 # AutoMarketer.ai — hackathon MVP
 
+> **This project is now developed independently of the hackathon.** For
+> the current architecture, what's next, and daily progress/errors, see:
+> `docs/WHITEPAPER.md`, `docs/SCHEDULE.md`, `docs/LOG.md`, `docs/ERROR_LOG.md`,
+> and `warehouse/README.md` (the new dbt/DuckDB/MotherDuck analytics layer).
+> Everything below this line is the original hackathon-day build, kept as
+> a historical record — some of it (RocketRide, HydraDB, hotdata.dev) is
+> no longer part of the go-forward plan.
+
 Working loop from the white paper:
 
 ```

@@ -11,3 +11,9 @@ plays/_failures.jsonl
 pipelines/services-catalog-reference.json
 .DS_Store
 Demo-white paper/
+warehouse/local.duckdb
+warehouse/*.duckdb.wal
+warehouse/target/
+warehouse/logs/
+warehouse/dbt_packages/
+warehouse/.user.yml

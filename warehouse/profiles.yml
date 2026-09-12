@@ -1,0 +1,23 @@
+# No secrets live in this file (MotherDuck token is read from the
+# MOTHERDUCK_TOKEN env var), so unlike .env this is safe to commit.
+#
+# Usage:
+#   export DBT_PROFILES_DIR=warehouse   # (once per shell, or add to .env/.envrc)
+#   cd warehouse
+#   dbt run                  # uses 'dev' target -> local DuckDB file
+#   dbt run --target cloud   # uses MotherDuck (needs MOTHERDUCK_TOKEN set)
+automarketer_warehouse:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: local.duckdb   # gitignored — local-only file, grows as you dbt run
+      threads: 4
+
+    cloud:
+      type: duckdb
+      # MotherDuck: sign up free at https://motherduck.com, create a token
+      # under Settings -> Tokens, then: export MOTHERDUCK_TOKEN=...
+      # First run auto-creates the "automarketer" database in your account.
+      path: "md:automarketer?motherduck_token={{ env_var('MOTHERDUCK_TOKEN') }}"
+      threads: 4

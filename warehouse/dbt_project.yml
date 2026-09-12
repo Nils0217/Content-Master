@@ -1,0 +1,16 @@
+name: "automarketer_warehouse"
+version: "1.0.0"
+config-version: 2
+
+profile: "automarketer_warehouse"
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  automarketer_warehouse:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table
