@@ -42,7 +42,12 @@ class RocketRide:
             return await c.use(filepath=filepath, args=[f"{k}={v}" for k, v in params.items()])
 
     def draft_posts(
-        self, product: dict[str, Any], channel: str, n: int = 3, context: str = ""
+        self,
+        product: dict[str, Any],
+        channel: str,
+        n: int = 3,
+        context: str = "",
+        prior: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Local stand-in for a RocketRide content-generation pipe: turns the
         Cognee/HydraDB product graph into N draft posts for one channel.
@@ -52,10 +57,16 @@ class RocketRide:
         calls the local LLM to write posts grounded in that real content.
         Without it (Cognee down, or no context passed), falls back to the
         old fixed-template generator so the rest of the loop never breaks.
+
+        `prior` (a Modiqo play record — see modiqo_play.find_play) is the
+        last winning post + its real metrics + the LLM's own improvement
+        note for this product/channel. When present, this run doesn't just
+        replay the old text: it writes a genuinely new version that acts on
+        that specific feedback — the "another loop" from the white paper.
         """
         name = product.get("name", "the product")
         if context.strip():
-            drafts = self._llm_draft_posts(name, channel, n, context)
+            drafts = self._llm_draft_posts(name, channel, n, context, prior)
             if drafts:
                 return drafts
 
@@ -73,7 +84,9 @@ class RocketRide:
             )
         return drafts
 
-    def _llm_draft_posts(self, name: str, channel: str, n: int, context: str) -> list[dict[str, Any]] | None:
+    def _llm_draft_posts(
+        self, name: str, channel: str, n: int, context: str, prior: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]] | None:
         """Ask the local LLM for N posts grounded in Cognee's extracted
         content. Returns None on any failure so the caller can fall back —
         never raises.
@@ -81,11 +94,27 @@ class RocketRide:
         prompt = (
             f"Here is what we know about a product called '{name}', extracted from its "
             f"source document:\n\n{context.strip()[:3000]}\n\n"
-            f"Write {n} distinct, short marketing posts for {channel} (under 280 characters "
-            "each) that reference concrete facts from the text above. Do not invent claims "
-            "not supported by the text. Reply with exactly one post per line, no numbering, "
-            "no extra commentary."
         )
+        if prior:
+            m = prior.get("last_metrics", {})
+            prompt += (
+                f"A previous post for this product/channel was: \"{prior.get('winning_text', '')}\"\n"
+                f"Its real results: {m.get('clicks', 0)} likes, {m.get('conversions', 0)} reposts, "
+                f"ctr={m.get('ctr', 0)}.\n"
+                f"A review of that result suggested this specific improvement: "
+                f"\"{prior.get('improvement_note', '')}\"\n\n"
+                f"Write {n} distinct, NEW short marketing posts for {channel} (under 280 characters "
+                "each) that actually apply that improvement and are not just a reword of the previous "
+                "post. Still ground every claim in the source text above — do not invent claims not "
+                "supported by it. Reply with exactly one post per line, no numbering, no extra commentary."
+            )
+        else:
+            prompt += (
+                f"Write {n} distinct, short marketing posts for {channel} (under 280 characters "
+                "each) that reference concrete facts from the text above. Do not invent claims "
+                "not supported by the text. Reply with exactly one post per line, no numbering, "
+                "no extra commentary."
+            )
         try:
             resp = requests.post(
                 _LLM_ENDPOINT,

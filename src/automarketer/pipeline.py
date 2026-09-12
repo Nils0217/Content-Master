@@ -77,24 +77,23 @@ def step2_hydradb_persist(product_name: str, features: list[str], icp: str) -> N
 def step3_rocketride_or_replay(
     product_name: str, features: list[str], channel: str, context: str = ""
 ) -> list[dict[str, Any]]:
-    """RocketRide generates drafts — unless Modiqo already has a winning play
-    for this (product, channel), in which case we replay it directly and
-    skip generation entirely. This is the visible "run #2 is cheaper" proof.
+    """RocketRide generates drafts. When Modiqo already has a play for this
+    (product, channel) — i.e. a prior run's winning post + its real metrics
+    + the LLM's improvement note — that gets fed back in as `prior` so this
+    run writes a genuinely improved version instead of a cold-start draft.
+    This is the "read results -> analysis -> new post -> another loop" cycle,
+    not a plain replay: every run calls the LLM again on purpose, trading
+    the old "run #2 is free" shortcut for content that actually compounds.
 
     `context` (Cognee's real extraction from the uploaded document, if any)
     is what lets RocketRide.draft_posts() ground the copy in the actual
     source material instead of the generic feature-name template.
     """
     play = find_play(product_name, channel)
-    if play:
-        audit.log_event("modiqo", "play.replayed", product=product_name, channel=channel,
-                         runs_so_far=play["runs"])
-        return [{"id": "replayed", "channel": channel, "text": play["winning_text"], "status": "draft"}]
-
     rr = RocketRide()
     audit.log_event("rocketride", "draft.start", product=product_name, channel=channel,
-                     grounded=bool(context))
-    drafts = rr.draft_posts({"name": product_name, "features": features}, channel, context=context)
+                     grounded=bool(context), improving_on_prior=bool(play))
+    drafts = rr.draft_posts({"name": product_name, "features": features}, channel, context=context, prior=play)
     audit.log_event("rocketride", "draft.done", n=len(drafts))
     return drafts
 

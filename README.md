@@ -52,10 +52,13 @@ strings instead of a file.
 ./.venv/bin/python run_pipeline.py --whitepaper "Marketing hack white paper.pdf" --channel x --product-name "AutoMarketer.ai"
 ```
 
-First run generates drafts via RocketRide and logs `rocketride/draft.start`.
-Run it again with the same product+channel and watch for
-`modiqo/play.replayed` instead — Rote's captured play replaces a fresh
-RocketRide call. That's the compounding/muscle-memory proof.
+First run generates cold-start drafts. Run it again with the same
+product+channel and check the log for `"improving_on_prior": true` —
+Modiqo's captured play (last winning post + its real pulled metrics + the
+LLM's own improvement note) gets fed back into the prompt, so the new
+drafts actually act on what worked/didn't, instead of being a cold start
+or a frozen replay. That's the compounding proof: content that gets better
+each run, not just cheaper.
 
 Every event is written to `audit/events.jsonl` (one JSON line per step).
 
