@@ -22,12 +22,14 @@ coding agent, not just when actually using Rote for the task), it
 unconditionally `function`-shadows those commands. There is no per-command
 or session opt-out flag in the script itself.
 **Fix:** Can't be granted/allowed from inside a session — it's a shell
-function, not a Claude Code permission. Remove or comment out the `source
-~/.rote/shell/init.sh` line in `~/.zshrc` (stops Rote's shell integration
-entirely — its tab completion too, not just the guard) and open a new
-shell/session. This is a persistent, global environment change (affects
-every terminal, not just Claude Code), so have the user do it themselves
-rather than editing their `~/.zshrc` automatically.
+function, not a Claude Code permission. **Better fix than editing
+`~/.zshrc`:** that source line is already `[ -f ~/.rote/shell/init.sh ] &&
+source ...` — file-existence-guarded — so just removing Rote entirely
+(`rm -rf ~/.rote ~/.local/bin/rote ~/.rote-play`, in the user's own
+terminal, not blocked there) makes the guard a no-op with no dotfile edit
+needed, and gets the CLI off the system too if that's also wanted. Only
+touch `~/.zshrc` directly if Rote itself needs to stay installed for some
+other reason.
 
 ---
 

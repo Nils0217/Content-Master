@@ -52,16 +52,20 @@ finished ones (keeps this file useful as a record of intent vs. reality).
       No CLI, no account. `hotdata_client.py` itself untouched but
       unimported — same dead-code treatment, delete by hand:
       `rm -f src/contentmaster/hotdata_client.py`.
-- [ ] Decide what to do with `pipelines/automarketer-content-gen.pipe` and
-      `rocketride_client.py`. Still open: the real `run()` path never
-      depended on RocketRide's execution (`RocketRide.draft_posts()` calls
-      the local Ollama LLM directly — `run_pipe()`/`account_info()`, the
-      only methods that touch the actual RocketRide SDK, aren't called
-      anywhere), so the class/file name is misleading. Rename to something
-      honest (e.g. `draft_generator.py`) once it's worth the churn (touches
-      `step3_rocketride_or_replay`'s name, several audit event names, this
-      file). `pipelines/*.pipe` itself: keep as historical artifact, or
-      remove.
+- [x] `rocketride_client.py` renamed `draft_generator.py`
+      (`RocketRide` class → `DraftGenerator`): it never depended on
+      RocketRide's execution — `draft_posts()` always called the local
+      Ollama LLM directly; `run_pipe()`/`account_info()` (the only methods
+      that touched the actual RocketRide SDK) weren't called anywhere and
+      were dropped along with the rename. `pipeline.py`'s
+      `step3_rocketride_or_replay` → `step3_generate_drafts`, audit event
+      stage `"rocketride"` → `"draft_generator"`. Verified live: a real
+      run still generates grounded drafts, logs `draft_generator/
+      draft.start` and `.done`. `rocketride_client.py` itself left as dead
+      code (unimported) — delete by hand:
+      `rm -f src/contentmaster/rocketride_client.py`.
+- [ ] `pipelines/automarketer-content-gen.pipe` itself: keep as historical
+      artifact, or remove.
 
 ## Phase 1 — data layer (dbt + DuckDB [+ MotherDuck])
 
@@ -91,7 +95,7 @@ finished ones (keeps this file useful as a record of intent vs. reality).
       table: same fields (product, channel, winning_text, metrics,
       improvement_note), but embeddable/queryable by similarity, not just
       exact (product, channel) key lookup
-- [ ] `rocketride_client.draft_posts()`'s `prior` argument should become a
+- [ ] `draft_generator.draft_posts()`'s `prior` argument should become a
       LanceDB similarity query ("find the most relevant past result for
       this product/channel/topic"), not just an exact-match play lookup
 - [ ] Decide on an embedding model (local, via Ollama's embedding support

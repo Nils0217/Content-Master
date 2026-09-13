@@ -96,8 +96,9 @@ src/contentmaster/
     bluesky.py                    # first implementation
     registry.py                   # name -> Platform class; PLATFORMS / PLANNED_PLATFORMS
   metrics_store.py             # layer 3 — local JSONL, read by warehouse/ dbt (hotdata.dev retired)
-  rocketride_client.py         # layer 4 — misleadingly named: calls local Ollama directly, not
-                               # RocketRide's cloud service (see docs/SCHEDULE.md Phase 0)
+  draft_generator.py            # layer 4 — calls local Ollama directly (renamed from
+                               # rocketride_client.py 2026-09-13, see docs/LOG.md — it never
+                               # actually depended on RocketRide's cloud service)
   human_loop.py                 # brand-safety gate (draft review)
   analysis.py                    # track -> ANALYSIS: cross-validate vs. warehouse history, human-confirmed
   discuss.py                      # ANALYSIS -> DISCUSS: 2 local models propose, 1 synthesizes
@@ -110,11 +111,12 @@ warehouse/                    # dbt + DuckDB (+ MotherDuck) analytics — see wa
 docs/                          # WHITEPAPER.md, SCHEDULE.md, LOG.md, ERROR_LOG.md
 ```
 
-`src/automarketer/` and `src/contentmaster/hydradb_client.py` /
-`hotdata_client.py` also still exist on disk — dead code nothing imports
+`src/contentmaster/hydradb_client.py` / `hotdata_client.py` /
+`rocketride_client.py` still exist on disk — dead code nothing imports
 (kept only because this dev environment's `rm` was blocked when they were
 retired; safe to delete by hand:
-`rm -rf src/automarketer src/contentmaster/hydradb_client.py src/contentmaster/hotdata_client.py`).
+`rm -f src/contentmaster/hydradb_client.py src/contentmaster/hotdata_client.py src/contentmaster/rocketride_client.py`).
+(`src/automarketer/`, the pre-rename package, has already been deleted.)
 
 ## One-time environment setup (already done on this machine)
 

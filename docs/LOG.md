@@ -258,3 +258,29 @@ cross-reference back here.
   Both via `claude plugin uninstall <name>`; confirmed via `claude plugin
   list` (now empty). A new session is needed for the SessionStart hook
   noise to fully stop, since the current process already loaded them.
+
+## 2026-09-13 (later still) — renamed rocketride_client.py -> draft_generator.py
+
+- User pushed back on the earlier "defer the rename" call: didn't
+  understand why `pipeline.py` still needed `rocketride_client.py`'s
+  `draft_posts()` if the decision was to hit Ollama directly. Answer was
+  that they're the same thing (draft_posts() only ever called Ollama; only
+  the unused `run_pipe()`/`account_info()` touched the real RocketRide
+  SDK) — the naming was just never fixed after the architecture pivot.
+  Given the confusion it was causing, did the rename now instead of
+  deferring further: new `src/contentmaster/draft_generator.py`
+  (`DraftGenerator` class, same `draft_posts()`/`_llm_draft_posts()` logic
+  verbatim, `run_pipe()`/`account_info()` dropped — genuinely unused).
+  `pipeline.py`: `step3_rocketride_or_replay` -> `step3_generate_drafts`,
+  audit event stage `"rocketride"` -> `"draft_generator"`. Verified live:
+  a real run still produces grounded drafts, audit log shows
+  `draft_generator/draft.start` and `.done`. `rocketride_client.py` left
+  as dead code (unimported), same treatment as the other retired files.
+- Also corrected an earlier suggestion: told the user to comment out the
+  `source ~/.rote/shell/init.sh` line in `~/.zshrc` to stop Rote's
+  agent-guard from blocking `rm`/`curl`/etc. (see docs/ERROR_LOG.md). User
+  pointed out that line is already guarded by `[ -f ... ] &&`, so just
+  deleting Rote entirely (`rm -rf ~/.rote ~/.local/bin/rote ~/.rote-play`
+  — something they'd wanted done anyway, from the earlier hackathon-installs
+  cleanup) achieves the same fix without editing a personal dotfile. Better
+  answer; gave them that instead.

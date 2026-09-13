@@ -1,14 +1,13 @@
 """Orchestrates the full loop (see docs/WHITEPAPER.md §2):
 
-  Cognee -> RocketRide -> [human review] -> (publish)
+  Cognee -> generate drafts (local Ollama) -> [human review] -> (publish)
     -> track metrics -> analysis (cross-validated vs. warehouse history,
     human-confirmed) -> discuss (2 local models propose, 1 synthesizes)
     -> log (Modiqo) -> next run's generation reads it back
 
-("RocketRide" here is legacy naming — RocketRideClient (rocketride_client.py)
-generates drafts by calling the local Ollama LLM directly, not RocketRide's
-own cloud service; see docs/SCHEDULE.md Phase 0. HydraDB was removed
-entirely 2026-09-13 — see docs/LOG.md.)
+HydraDB and RocketRide were removed entirely 2026-09-13 — draft
+generation was never RocketRide's cloud service to begin with, only ever
+local Ollama calls; see docs/LOG.md.
 
 Run with: contentmaster run --whitepaper "Marketing hack white paper.pdf"
 """
@@ -23,11 +22,11 @@ from .analysis import analyze_performance
 from .cognee_client import CogneeClient
 from .config import CogneeSettings, settings
 from .discuss import synthesize_strategy
+from .draft_generator import DraftGenerator
 from .human_loop import ReviewInterrupted, review_draft
 from .modiqo_play import capture_failure, capture_success, find_play
 from .platforms.base import PlatformAPIError, PlatformConfigError
 from .platforms.registry import PLATFORMS, get_platform
-from .rocketride_client import RocketRide
 
 SUCCESS_CTR_THRESHOLD = 0.02  # click-through rate above this counts as a "win" for Modiqo
 
@@ -68,27 +67,28 @@ def step1_cognee_extract(whitepaper_path: str, dataset_label: str, product_name:
     return ""
 
 
-def step3_rocketride_or_replay(
+def step3_generate_drafts(
     product_name: str, features: list[str], channel: str, context: str = ""
 ) -> list[dict[str, Any]]:
-    """RocketRide generates drafts. When Modiqo already has a play for this
-    (product, channel) — i.e. a prior run's winning post + its real metrics
-    + the LLM's improvement note — that gets fed back in as `prior` so this
-    run writes a genuinely improved version instead of a cold-start draft.
-    This is the "read results -> analysis -> new post -> another loop" cycle,
-    not a plain replay: every run calls the LLM again on purpose, trading
-    the old "run #2 is free" shortcut for content that actually compounds.
+    """Generates drafts via the local LLM (see draft_generator.py). When
+    Modiqo already has a play for this (product, channel) — i.e. a prior
+    run's winning post + its real metrics + the LLM's improvement note —
+    that gets fed back in as `prior` so this run writes a genuinely
+    improved version instead of a cold-start draft. This is the "read
+    results -> analysis -> new post -> another loop" cycle, not a plain
+    replay: every run calls the LLM again on purpose, trading the old
+    "run #2 is free" shortcut for content that actually compounds.
 
     `context` (Cognee's real extraction from the uploaded document, if any)
-    is what lets RocketRide.draft_posts() ground the copy in the actual
-    source material instead of the generic feature-name template.
+    is what lets draft_posts() ground the copy in the actual source
+    material instead of the generic feature-name template.
     """
     play = find_play(product_name, channel)
-    rr = RocketRide()
-    audit.log_event("rocketride", "draft.start", product=product_name, channel=channel,
+    generator = DraftGenerator()
+    audit.log_event("draft_generator", "draft.start", product=product_name, channel=channel,
                      grounded=bool(context), improving_on_prior=bool(play))
-    drafts = rr.draft_posts({"name": product_name, "features": features}, channel, context=context, prior=play)
-    audit.log_event("rocketride", "draft.done", n=len(drafts))
+    drafts = generator.draft_posts({"name": product_name, "features": features}, channel, context=context, prior=play)
+    audit.log_event("draft_generator", "draft.done", n=len(drafts))
     return drafts
 
 
@@ -224,9 +224,9 @@ def run(whitepaper_path: str, channel: str = "x", product_name: str | None = Non
         audit.log_event("cognee", "extract.failed", error=str(e))
         print(f"[warn] Cognee extraction failed ({e}); continuing with supplied product info.")
 
-    # Step 3: RocketRide (or Modiqo replay) — grounded in Cognee's real
+    # Step 3: generate drafts (local LLM) — grounded in Cognee's real
     # extraction when available, so drafts reflect the uploaded document.
-    drafts = step3_rocketride_or_replay(product_name, features, channel, context=context)
+    drafts = step3_generate_drafts(product_name, features, channel, context=context)
 
     # Steps 4-7: human review -> publish -> track metrics -> Modiqo, per draft
     results: list[dict[str, Any]] = []
