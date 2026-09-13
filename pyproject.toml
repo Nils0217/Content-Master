@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "automarketer"
+name = "contentmaster"
 version = "0.1.0"
 description = "Compound marketing agent: extract -> draft -> review -> publish -> track -> improve, with real memory."
 readme = "README.md"
@@ -22,7 +22,12 @@ dependencies = [
 warehouse = ["dbt-duckdb"]
 
 [project.scripts]
-automarketer = "automarketer.cli:main"
+contentmaster = "contentmaster.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["contentmaster*"]
+# src/automarketer/ is the pre-rename package — dead code, nothing imports
+# it (see docs/LOG.md 2026-09-13). Left in place only because this dev
+# environment's `rm` was blocked when the rename happened; delete it by
+# hand: `rm -rf src/automarketer`. Excluded here so it's never packaged.

@@ -6,7 +6,7 @@
 #   cd warehouse
 #   dbt run                  # uses 'dev' target -> local DuckDB file
 #   dbt run --target cloud   # uses MotherDuck (needs MOTHERDUCK_TOKEN set)
-automarketer_warehouse:
+contentmaster_warehouse:
   target: dev
   outputs:
     dev:
@@ -18,6 +18,6 @@ automarketer_warehouse:
       type: duckdb
       # MotherDuck: sign up free at https://motherduck.com, create a token
       # under Settings -> Tokens, then: export MOTHERDUCK_TOKEN=...
-      # First run auto-creates the "automarketer" database in your account.
-      path: "md:automarketer?motherduck_token={{ env_var('MOTHERDUCK_TOKEN') }}"
+      # First run auto-creates the "contentmaster" database in your account.
+      path: "md:contentmaster?motherduck_token={{ env_var('MOTHERDUCK_TOKEN') }}"
       threads: 4

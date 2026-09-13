@@ -1,11 +1,12 @@
-# AutoMarketer — a compound marketing agent with real memory
+# ContentMaster — a compound marketing agent with real memory
 
 > Originally built at a hackathon against five mandated sponsor tools
-> (Cognee, HydraDB, hotdata.dev, RocketRide.ai, Modiqo.ai/Rote) plus Snyk.
-> This document describes the project going forward, as an independent,
-> open-source, local-first system — not a hackathon submission. See
-> `docs/LOG.md` for the history of how it got here and `Marketing hack
-> white paper.pdf` for the original hackathon-era version.
+> (Cognee, HydraDB, hotdata.dev, RocketRide.ai, Modiqo.ai/Rote) plus Snyk,
+> under the name "AutoMarketer.ai". This document describes the project
+> going forward, as an independent, open-source, local-first system — not
+> a hackathon submission. See `docs/LOG.md` for the history of how it got
+> here (including the rename) and `Marketing hack white paper.pdf` for the
+> original hackathon-era version.
 
 ## 1. Vision
 
@@ -14,12 +15,11 @@ An AI agent pulls out whatever is actually useful, regardless of the
 source format. It produces marketing material (text posts today; images
 and video as the project grows). A human reviews it. What gets approved
 gets published. The agent then tracks real performance against
-human-defined KPIs, proposes a concrete improvement (or confirms the
-approach worked), and writes the result into a durable memory layer. The
-next round of content generation draws on that memory — not a cold start,
+human-defined KPIs, crocess analysis performance and enviromental conditional, proposes a concrete improvement (or confirms the approach worked), and writes the result into a durable memory layer. The next round of content generation draws on that memory — not a cold start,
 not a frozen replay, a version that acted on what was actually learned.
 
-The project is open source. As the dataset of (content → post → real
+The project is open source, CLI design (`contentmaster` — see `README.md`).
+As the dataset of (content → post → real
 performance → improvement) accumulates, the goal is to package it as a
 domain-specific plugin any LLM can attach to — via MCP — so the knowledge
 compounds independently of which model is doing the writing.
@@ -39,7 +39,9 @@ any input (doc / video / code / podcast)
    human review  ──reject──▶  logged as a negative example
         │ approve
         ▼
-   publish (Bluesky today; Mastodon next)
+   publish (Bluesky as testing — via a generic Platform adapter interface,
+            src/contentmaster/platforms/, so other platforms plug in without
+            touching pipeline.py — see README.md "Platforms")
         │
         ▼
    pull real results (likes / reposts / replies against a human-set KPI)
@@ -58,7 +60,7 @@ any input (doc / video / code / podcast)
 ```
 
 This is a real, running loop today (text-only, Bluesky-only) — not just a
-diagram. See `src/automarketer/pipeline.py`.
+diagram. See `src/contentmaster/pipeline.py`.
 
 ## 3. Architecture
 
@@ -69,11 +71,11 @@ diagram. See `src/automarketer/pipeline.py`.
 | Image generation | **FLUX.1 schnell** / **SDXL Turbo**, local | Open-weight, fast enough to iterate on a single Mac |
 | Video | Scripted composition (LLM script → generated images → local TTS → `ffmpeg`/`moviepy`), not a generative video model | Open generative video models aren't yet good/fast enough for real marketing output; composition is a more honest use of current tools |
 | Human review | **Streamlit** or **Gradio** | A terminal `input()` prompt can't show an image or a video preview; this can |
-| Publishing | **Bluesky** (done), **Mastodon** next | Both free, open protocols — no vendor account/API-approval bottleneck |
+| Publishing | **Bluesky** (done), behind a generic `Platform` adapter interface (`platforms/base.py`) — **Mastodon** next | Both free, open protocols — no vendor account/API-approval bottleneck; the adapter interface means new platforms (X, Instagram, Facebook, YouTube) plug in without touching orchestration code |
 | Analytics | **DuckDB**, transformed via **dbt**, optionally shared via **MotherDuck** | Embedded, real SQL, zero accounts for local use; MotherDuck is a one-flag upgrade to a shared warehouse when needed. See `warehouse/README.md` |
 | Memory / dataset | **LanceDB** | Portable, embeddable, and — critically — model-agnostic: the whole point is that any LLM can read this, not just whichever one wrote it |
 | Distribution | A thin, self-built **MCP server** over the LanceDB dataset | Lets any MCP-capable LLM client query "what's worked before" without retraining anything |
-| Orchestration | `src/automarketer/pipeline.py` (hand-rolled) | Already does the real work; a heavier framework (LangGraph) only earns its keep if/when the control flow gets a lot more complex |
+| Orchestration | `src/contentmaster/pipeline.py` (hand-rolled) | Already does the real work; a heavier framework (LangGraph) only earns its keep if/when the control flow gets a lot more complex |
 
 **Deliberately not used going forward:** RocketRide.ai (Cloud UI friction,
 and the real pipeline never actually depended on it — see

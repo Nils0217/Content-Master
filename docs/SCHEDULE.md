@@ -6,12 +6,25 @@ finished ones (keeps this file useful as a record of intent vs. reality).
 
 ## Phase 0a — packaging
 
-- [x] `pyproject.toml` + `src/automarketer/cli.py`: `automarketer` is now
-      a real installed command (`pip install -e .`), with `run` and
-      `bluesky verify` subcommands. `run_pipeline.py` /
+- [x] `pyproject.toml` + `src/contentmaster/cli.py`: `contentmaster` is now
+      a real installed command (`pip install -e .`), with `run`,
+      `platforms`, and `connect <platform>` subcommands. `run_pipeline.py` /
       `scripts/verify_bluesky.py` kept as deprecated forwarding wrappers.
+- [x] Project renamed `automarketer` → `contentmaster` (package dir, CLI
+      command, dbt project/profile name, Cognee default dataset name).
+      `src/automarketer/` left on disk as dead code — this dev
+      environment's `rm` was blocked when the rename happened; delete by
+      hand (`rm -rf src/automarketer`). hotdata.dev's `automarketer`
+      catalog name deliberately NOT renamed — it's a real external
+      resource, not the project's own name (see `hotdata_client.py`).
+- [x] Bluesky pulled out from under a bluesky-specific CLI subcommand into
+      a generic `Platform` adapter interface (`src/contentmaster/platforms/`)
+      — `contentmaster connect <platform>` and `run --channel <platform>`
+      work with whatever's registered, not just Bluesky. Mastodon, X,
+      Instagram, Facebook, YouTube are named as planned placeholders in
+      `platforms/registry.py` (not implemented) — see Phase 6.
 - [ ] As Phase 1–7 land, add their subcommands here too instead of new
-      standalone scripts (e.g. `automarketer warehouse build`, once the
+      standalone scripts (e.g. `contentmaster warehouse build`, once the
       dbt invocation is worth wrapping).
 
 ## Phase 0 — retire hackathon-only dependencies
@@ -83,9 +96,13 @@ finished ones (keeps this file useful as a record of intent vs. reality).
 
 ## Phase 6 — channels
 
-- [ ] Mastodon adapter, mirroring `bluesky_client.py`'s shape
-      (`test_connection`, `fetch_public_posts`, `publish_post`,
-      `get_post_metrics`)
+- [ ] Mastodon adapter: `platforms/mastodon.py` implementing `Platform`
+      (`platforms/base.py`), registered in `platforms/registry.py`'s
+      `PLATFORMS` (move it out of `PLANNED_PLATFORMS`). Mirror
+      `platforms/bluesky.py`'s shape.
+- [ ] Same for X, Instagram, Facebook, YouTube as each becomes worth
+      building — no CLI or `pipeline.py` change needed per platform, just
+      the adapter file + registry entry.
 
 ## Phase 7 — distribution (MCP server)
 

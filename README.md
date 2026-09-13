@@ -1,12 +1,142 @@
-# AutoMarketer.ai — hackathon MVP
+# ContentMaster
 
-> **This project is now developed independently of the hackathon.** For
-> the current architecture, what's next, and daily progress/errors, see:
-> `docs/WHITEPAPER.md`, `docs/SCHEDULE.md`, `docs/LOG.md`, `docs/ERROR_LOG.md`,
-> and `warehouse/README.md` (the new dbt/DuckDB/MotherDuck analytics layer).
-> Everything below this line is the original hackathon-day build, kept as
-> a historical record — some of it (RocketRide, HydraDB, hotdata.dev) is
-> no longer part of the go-forward plan.
+Extract -> draft -> human review -> publish -> track real results -> improve
+-> write to memory -> loop again. Originally built at a hackathon (as
+"AutoMarketer.ai") against five mandated sponsor tools; now developed
+independently. See `docs/WHITEPAPER.md` for the current architecture,
+`docs/SCHEDULE.md` for what's next, `docs/LOG.md` / `docs/ERROR_LOG.md` for
+daily progress and known issues.
+
+## Install the CLI
+
+```bash
+./.venv/bin/pip install -e .
+```
+
+This registers `contentmaster` as a proper command (`./.venv/bin/contentmaster`,
+or bare `contentmaster` once the venv is active — `source .venv/bin/activate`).
+`pyproject.toml`'s `[project.scripts]` entry point is what does this;
+`src/contentmaster/cli.py` is the dispatcher — add a new subcommand there as
+the project grows (keep the actual logic in the relevant module, cli.py
+stays thin). The old `run_pipeline.py` / `scripts/verify_bluesky.py`
+entry points still work — they just forward to the same CLI now.
+
+## Run it
+
+```bash
+contentmaster run --whitepaper "Marketing hack white paper.pdf" --channel x --product-name "AutoMarketer.ai"
+```
+
+First run generates cold-start drafts. Run it again with the same
+product+channel and check the log for `"improving_on_prior": true` —
+Modiqo's captured play (last winning post + its real pulled metrics + the
+LLM's own improvement note) gets fed back into the prompt, so the new
+drafts actually act on what worked/didn't, instead of being a cold start
+or a frozen replay. That's the compounding proof: content that gets better
+each run, not just cheaper.
+
+Every event is written to `audit/events.jsonl` (one JSON line per step).
+
+## Platforms
+
+Publishing/pulling-metrics is behind a common `Platform` adapter interface
+(`src/contentmaster/platforms/base.py`) — nothing in `pipeline.py` or the
+CLI is Bluesky-specific; `--channel <name>` works with whatever's
+registered in `platforms/registry.py`.
+
+```bash
+contentmaster platforms              # list implemented + planned platforms
+contentmaster connect bluesky        # auth check
+contentmaster connect bluesky --search "AI agents" --limit 3   # + fetch + ingest into Cognee
+```
+
+**Implemented today:** Bluesky (official `atproto` SDK, app-password auth
+via `BLUESKY_HANDLE`/`BLUESKY_APP_PASSWORD` — an **app password** from
+bsky.app → Settings → App Passwords, never your account password; set in
+the environment or `.env`, see `env.example` — never hardcoded, never
+logged). `platforms/bluesky.py`'s exceptions all map to the generic
+`PlatformConfigError` / `PlatformAuthError` / `PlatformRateLimitError` /
+`PlatformAPIError` types from `platforms/base.py`, so any platform's
+failures look the same to calling code.
+
+**Planned, not implemented yet** (see `docs/SCHEDULE.md`): Mastodon, X,
+Instagram, Facebook, YouTube. Adding one: write `platforms/<name>.py`
+implementing the `Platform` interface, register it in
+`platforms/registry.py`'s `PLATFORMS` dict — no CLI or `pipeline.py`
+change needed.
+
+Verified live (Bluesky): auth succeeded, real posts fetched, published for
+real, and real engagement (likes/reposts/replies) pulled back after
+publish.
+
+## Project layout
+
+```
+.env                         # all credentials/config (gitignored)
+pyproject.toml                # packaging + the `contentmaster` CLI entry point
+requirements.txt
+run_pipeline.py               # deprecated — forwards to `contentmaster run`
+scripts/
+  configure_cognee_llm.sh     # (re)start Cognee wired to Ollama
+  start_hydradb.sh            # start the local HydraDB graph-node
+  verify_bluesky.py           # deprecated — forwards to `contentmaster connect bluesky`
+src/contentmaster/
+  cli.py                       # `contentmaster` CLI dispatcher — thin, no real logic of its own
+  config.py                   # loads .env into typed settings
+  cognee_client.py             # layer 1
+  platforms/                    # Platform adapter interface + implementations
+    base.py                       # the Platform ABC + Post + generic exceptions
+    bluesky.py                    # first implementation
+    registry.py                   # name -> Platform class; PLATFORMS / PLANNED_PLATFORMS
+  hydradb_client.py            # layer 2 (+ OpenCypher subset notes)
+  hotdata_client.py            # layer 3 (real CLI writes + queries)
+  rocketride_client.py         # layer 4
+  human_loop.py                 # brand-safety gate
+  modiqo_play.py                # layer 5 (muscle memory)
+  audit.py                      # JSONL audit log
+  pipeline.py                   # orchestrator
+plays/                        # captured muscle-memory patterns (per product+channel)
+audit/events.jsonl            # audit log
+warehouse/                    # dbt + DuckDB (+ MotherDuck) analytics — see warehouse/README.md
+docs/                          # WHITEPAPER.md, SCHEDULE.md, LOG.md, ERROR_LOG.md
+```
+
+`src/automarketer/` also still exists on disk — it's the pre-rename
+package, dead code that nothing imports (kept only because this dev
+environment's `rm` was blocked when the rename happened; safe to
+`rm -rf src/automarketer` by hand).
+
+## One-time environment setup (already done on this machine)
+
+```bash
+bash scripts/start_hydradb.sh          # local HydraDB graph-node
+bash scripts/configure_cognee_llm.sh   # Cognee container wired to local Ollama
+```
+
+Requires Ollama running locally with `llama3.2:3b` and `nomic-embed-text`
+pulled (`ollama pull llama3.2:3b && ollama pull nomic-embed-text`). A
+smaller model (`llama3.2:1b`) responds faster but was unreliable at
+structured-output extraction in testing — Cognee's summarization step kept
+failing Pydantic validation and retrying with exponential backoff. `3b` was
+the smallest model that passed a structured-output benchmark reliably; it
+still fits comfortably alongside Docker on an 8GB machine.
+
+Note: HydraDB is slated for retirement in favor of LanceDB (see
+`docs/WHITEPAPER.md` §3, `docs/SCHEDULE.md` Phase 0) — `pipeline.py`
+still calls it today, so `start_hydradb.sh` is still needed for a full
+`contentmaster run` until that phase lands.
+
+---
+
+## (historical) AutoMarketer.ai — hackathon MVP (2026-09-11)
+
+> Everything below this line is the original hackathon-day README content,
+> kept as a historical record — not updated for the later rename
+> (`automarketer` → `contentmaster`) or platform-adapter refactor. Command
+> examples below use the old names and won't work as typed; see the
+> sections above for current usage. Some tools mentioned (RocketRide,
+> HydraDB, hotdata.dev) are no longer part of the go-forward plan — see
+> `docs/WHITEPAPER.md` §3.
 
 Working loop from the white paper:
 
@@ -26,7 +156,7 @@ All six sponsor tools are **live and verified**, not stubbed:
 | Muscle memory | Modiqo.ai (Rote) | ✅ CLI logged in, hackathon warm-up play passed, local workspace `automarketer` registers each successful run. |
 | Security | Snyk | ✅ CLI authenticated. `snyk test` (deps): 0 vulnerabilities. `snyk code test` (source): caught a LOW path-traversal pattern in `config.py`, fixed by resolving+confining the path to the project root. |
 
-## Bluesky integration (extra data source)
+### Bluesky integration (as first built)
 
 Fetches public Bluesky posts (official `atproto` SDK, app-password auth) and
 feeds them into the same Cognee ingestion pipeline the whitepaper goes
@@ -54,81 +184,11 @@ Verified live: auth succeeded, 3 real posts fetched, and
 `add_document()` already used for the PDF, just called with `raw_data`
 strings instead of a file.
 
-## Install the CLI
+(This was later refactored behind a generic `Platform` adapter interface
+so Bluesky is one of several eventual destinations rather than a
+special-cased path — see the "Platforms" section above.)
 
-```bash
-./.venv/bin/pip install -e .
-```
-
-This registers `automarketer` as a proper command (`./.venv/bin/automarketer`,
-or bare `automarketer` once the venv is active — `source .venv/bin/activate`).
-`pyproject.toml`'s `[project.scripts]` entry point is what does this;
-`src/automarketer/cli.py` is the dispatcher — add a new subcommand there as
-the project grows (keep the actual logic in the relevant module, cli.py
-stays thin). The old `run_pipeline.py` / `scripts/verify_bluesky.py`
-entry points still work — they just forward to the same CLI now.
-
-## Run it
-
-```bash
-automarketer run --whitepaper "Marketing hack white paper.pdf" --channel x --product-name "AutoMarketer.ai"
-```
-
-First run generates cold-start drafts. Run it again with the same
-product+channel and check the log for `"improving_on_prior": true` —
-Modiqo's captured play (last winning post + its real pulled metrics + the
-LLM's own improvement note) gets fed back into the prompt, so the new
-drafts actually act on what worked/didn't, instead of being a cold start
-or a frozen replay. That's the compounding proof: content that gets better
-each run, not just cheaper.
-
-Every event is written to `audit/events.jsonl` (one JSON line per step).
-
-## One-time environment setup (already done on this machine)
-
-```bash
-bash scripts/start_hydradb.sh          # local HydraDB graph-node
-bash scripts/configure_cognee_llm.sh   # Cognee container wired to local Ollama
-```
-
-Requires Ollama running locally with `llama3.2:3b` and `nomic-embed-text`
-pulled (`ollama pull llama3.2:3b && ollama pull nomic-embed-text`). A
-smaller model (`llama3.2:1b`) responds faster but was unreliable at
-structured-output extraction in testing — Cognee's summarization step kept
-failing Pydantic validation and retrying with exponential backoff. `3b` was
-the smallest model that passed a structured-output benchmark reliably; it
-still fits comfortably alongside Docker on an 8GB machine.
-
-## Project layout
-
-```
-.env                         # all credentials/config (gitignored)
-pyproject.toml                # packaging + the `automarketer` CLI entry point
-requirements.txt
-run_pipeline.py               # deprecated — forwards to `automarketer run`
-scripts/
-  configure_cognee_llm.sh     # (re)start Cognee wired to Ollama
-  start_hydradb.sh            # start the local HydraDB graph-node
-  verify_bluesky.py           # deprecated — forwards to `automarketer bluesky verify`
-src/automarketer/
-  cli.py                       # `automarketer` CLI dispatcher — thin, no real logic of its own
-  config.py                   # loads .env into typed settings
-  cognee_client.py             # layer 1
-  bluesky_client.py             # extra data source -> feeds layer 1's ingest
-  hydradb_client.py            # layer 2 (+ OpenCypher subset notes)
-  hotdata_client.py            # layer 3 (real CLI writes + queries)
-  rocketride_client.py         # layer 4
-  human_loop.py                 # brand-safety gate
-  modiqo_play.py                # layer 5 (muscle memory)
-  audit.py                      # JSONL audit log
-  pipeline.py                   # orchestrator
-plays/                        # captured muscle-memory patterns (per product+channel)
-audit/events.jsonl            # audit log
-warehouse/                    # dbt + DuckDB (+ MotherDuck) analytics — see warehouse/README.md
-docs/                          # WHITEPAPER.md, SCHEDULE.md, LOG.md, ERROR_LOG.md
-```
-
-## RocketRide: how the `.pipe` file was actually built
+### RocketRide: how the `.pipe` file was actually built
 
 Not via GUI drag-and-drop in RocketRide Cloud's canvas (the mouse-precision
 approach kept missing connector hit-targets). Instead:
@@ -161,7 +221,7 @@ approach kept missing connector hit-targets). Instead:
 `client.get_services()`) has the full catalog if you want to extend the
 pipeline further.
 
-## What's still simulated (be upfront about this if a judge asks)
+### What's still simulated (be upfront about this if a judge asks)
 
 - `step5_publish()` posts for real on `--channel bluesky` (gated by the
   human_loop approval); every other channel still simulates — no adapter
@@ -171,7 +231,7 @@ pipeline further.
   the storage/query round trip through hotdata.dev itself is 100% real
   either way, not mocked.
 
-## Known rough edges / next steps
+### Known rough edges / next steps (as of hackathon day — see docs/SCHEDULE.md for current)
 
 1. `hydradb-data/` has a few smoke-test nodes mixed into the real graph
    from connection verification (a `Product{id:101}` node with feature

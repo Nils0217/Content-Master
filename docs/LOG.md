@@ -94,3 +94,46 @@ cross-reference back here.
   from freezing an editable install pointed at this repo's own GitHub
   remote. Neither belonged in the package's own dependency list — see
   `docs/ERROR_LOG.md`.
+
+## 2026-09-13 — Platform adapter interface; renamed automarketer → contentmaster
+
+- Corrected a design mistake from the CLI-packaging work: Bluesky had been
+  wired in as a Bluesky-specific top-level CLI subcommand
+  (`automarketer bluesky verify`). Adding IG/FB/X/YouTube/Mastodon the same
+  way would mean a new special-cased subcommand tree per platform. Replaced
+  with a generic `Platform` adapter interface
+  (`src/contentmaster/platforms/base.py`: `test_connection`,
+  `fetch_public_posts`, `publish_post`, `get_post_metrics`, plus generic
+  `PlatformConfigError`/`PlatformAuthError`/`PlatformRateLimitError`/
+  `PlatformAPIError` exceptions) and a `registry.py` (`PLATFORMS` /
+  `PLANNED_PLATFORMS`) that `pipeline.py` and the CLI look platforms up in
+  by name. `bluesky_client.py` became `platforms/bluesky.py`, the first
+  (and so far only) real implementation; Mastodon/X/Instagram/Facebook/
+  YouTube are named placeholders in `PLANNED_PLATFORMS`, not stub classes.
+  CLI: `automarketer bluesky verify` → `contentmaster connect <platform>`
+  (works for any registered platform); new `contentmaster platforms` lists
+  what's implemented vs. planned. `pipeline.py`'s `step5_publish` /
+  `step6_hotdata_metrics` now branch on "is this channel in PLATFORMS",
+  not "is this channel == bluesky".
+- Renamed the project `automarketer` → `contentmaster`: package directory
+  (`src/automarketer/` → `src/contentmaster/`), CLI command
+  (`automarketer` → `contentmaster`), `pyproject.toml` project name, dbt
+  project/profile name (`automarketer_warehouse` → `contentmaster_warehouse`
+  in `warehouse/dbt_project.yml` + `warehouse/profiles.yml` — re-ran `dbt
+  run` after to confirm the rename didn't break anything), Cognee's default
+  dataset name, Rote's workspace name. Deliberately did NOT rename
+  `hotdata_client.py`'s `CATALOG = "automarketer"` — that's the name of an
+  already-existing external hotdata.dev catalog, not the project's own
+  name; renaming it would just point at a different, empty catalog (see
+  `docs/ERROR_LOG.md`). `pipelines/automarketer-content-gen.pipe` also
+  left un-renamed — it's a real file with that literal name.
+- `src/automarketer/` (the pre-rename package) could not be deleted —
+  `rm` is blocked in this dev environment — so it was excluded from
+  packaging instead (`pyproject.toml`'s `packages.find.include`) and left
+  as inert dead code nothing imports. Flagged in `README.md` and
+  `docs/SCHEDULE.md` for manual deletion.
+- Verified: `contentmaster --help` / `platforms` / `connect bluesky` (auth
+  succeeded against the real account) all work post-rename; the old
+  `scripts/verify_bluesky.py` wrapper (now forwarding to `connect bluesky`)
+  still works too; `dbt run` still builds all 4 models after the
+  warehouse rename.

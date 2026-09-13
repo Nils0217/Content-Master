@@ -34,7 +34,7 @@ prompt — no server, no login, no dashboard to fight with.
 2. `export MOTHERDUCK_TOKEN=...` (put it in `.env`, never commit it).
 3. `dbt run --target cloud` — same models, same SQL, now materialized in
    MotherDuck instead of the local file. First run auto-creates the
-   `automarketer` database in your MotherDuck account.
+   `contentmaster` database in your MotherDuck account.
 
 ## Layout
 

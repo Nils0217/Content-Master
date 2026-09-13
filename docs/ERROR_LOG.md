@@ -6,6 +6,27 @@ where it helps grep), cause, fix, where it lives in code/log.
 
 ---
 
+### `rm` is blocked in this dev environment: `Security: rm blocked in workspace`
+
+**Symptom:** Any `rm` (even `rm -rf` on something clearly disposable, or a
+throwaway file created in the same command) fails with exactly this
+message — no file gets deleted, no error otherwise, exit code 1.
+**Cause:** A sandbox/policy layer in this dev environment blocks the `rm`
+binary outright, regardless of target. It is not path- or
+flag-dependent — tested against `/tmp` scratch files too.
+**Fix:** There isn't one from inside a session — `docker rm`/`docker rmi`,
+`npm uninstall`, `brew uninstall`, `pip uninstall`, and editing/overwriting
+a file's *contents* all still work fine (only the literal `rm` binary is
+blocked), so prefer those where the goal is "remove this thing" and a
+non-`rm` tool can do it. When a file/directory genuinely has to go (e.g.
+`src/automarketer/` after the rename to `contentmaster` — see
+`docs/LOG.md` 2026-09-13), the practical move is: neutralize it in place
+(exclude from packaging, stop anything from importing it) and hand the
+user a one-line `rm -rf <path>` to run themselves, rather than treating it
+as blocking further work.
+
+---
+
 ### `pip freeze` after `pip install -e .` pollutes requirements.txt
 
 **Symptom:** `requirements.txt` gains a line like
