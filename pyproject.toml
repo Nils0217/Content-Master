@@ -13,9 +13,11 @@ dependencies = [
     "python-dotenv",
     "atproto",
     "striprtf",
-    "rocketride",   # only used by rocketride_client.py — see docs/SCHEDULE.md Phase 0
     "duckdb",       # analysis.py reads warehouse/local.duckdb directly (read-only, no dbt needed at read time)
 ]
+# "rocketride" removed 2026-09-13 — draft_generator.py (renamed from
+# rocketride_client.py) never actually used the RocketRide SDK, only
+# `requests` to call Ollama directly. See docs/LOG.md.
 
 [project.optional-dependencies]
 # Full dbt-duckdb stack — only needed if you're running `dbt` yourself to
@@ -30,7 +32,6 @@ contentmaster = "contentmaster.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["contentmaster*"]
-# src/automarketer/ is the pre-rename package — dead code, nothing imports
-# it (see docs/LOG.md 2026-09-13). Left in place only because this dev
-# environment's `rm` was blocked when the rename happened; delete it by
-# hand: `rm -rf src/automarketer`. Excluded here so it's never packaged.
+# src/automarketer/ was the pre-rename package (see docs/LOG.md
+# 2026-09-13) — already deleted from disk. This include= filter stays as
+# a guard against anything similarly-named reappearing under src/.
