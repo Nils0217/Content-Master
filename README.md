@@ -84,7 +84,8 @@ requirements.txt
 run_pipeline.py               # deprecated — forwards to `contentmaster run`
 scripts/
   configure_cognee_llm.sh     # (re)start Cognee wired to Ollama
-  start_hydradb.sh            # start the local HydraDB graph-node
+  start_hydradb.sh            # unused now (HydraDB removed 2026-09-13) — kept only in case a future
+                               # LanceDB/Phase 2 migration wants the old graph as reference
   verify_bluesky.py           # deprecated — forwards to `contentmaster connect bluesky`
 src/contentmaster/
   cli.py                       # `contentmaster` CLI dispatcher — thin, no real logic of its own
@@ -94,9 +95,9 @@ src/contentmaster/
     base.py                       # the Platform ABC + Post + generic exceptions
     bluesky.py                    # first implementation
     registry.py                   # name -> Platform class; PLATFORMS / PLANNED_PLATFORMS
-  hydradb_client.py            # layer 2 (+ OpenCypher subset notes)
   metrics_store.py             # layer 3 — local JSONL, read by warehouse/ dbt (hotdata.dev retired)
-  rocketride_client.py         # layer 4
+  rocketride_client.py         # layer 4 — misleadingly named: calls local Ollama directly, not
+                               # RocketRide's cloud service (see docs/SCHEDULE.md Phase 0)
   human_loop.py                 # brand-safety gate (draft review)
   analysis.py                    # track -> ANALYSIS: cross-validate vs. warehouse history, human-confirmed
   discuss.py                      # ANALYSIS -> DISCUSS: 2 local models propose, 1 synthesizes
@@ -109,15 +110,15 @@ warehouse/                    # dbt + DuckDB (+ MotherDuck) analytics — see wa
 docs/                          # WHITEPAPER.md, SCHEDULE.md, LOG.md, ERROR_LOG.md
 ```
 
-`src/automarketer/` also still exists on disk — it's the pre-rename
-package, dead code that nothing imports (kept only because this dev
-environment's `rm` was blocked when the rename happened; safe to
-`rm -rf src/automarketer` by hand).
+`src/automarketer/` and `src/contentmaster/hydradb_client.py` /
+`hotdata_client.py` also still exist on disk — dead code nothing imports
+(kept only because this dev environment's `rm` was blocked when they were
+retired; safe to delete by hand:
+`rm -rf src/automarketer src/contentmaster/hydradb_client.py src/contentmaster/hotdata_client.py`).
 
 ## One-time environment setup (already done on this machine)
 
 ```bash
-bash scripts/start_hydradb.sh          # local HydraDB graph-node
 bash scripts/configure_cognee_llm.sh   # Cognee container wired to local Ollama
 ```
 
@@ -128,11 +129,6 @@ structured-output extraction in testing — Cognee's summarization step kept
 failing Pydantic validation and retrying with exponential backoff. `3b` was
 the smallest model that passed a structured-output benchmark reliably; it
 still fits comfortably alongside Docker on an 8GB machine.
-
-Note: HydraDB is slated for retirement in favor of LanceDB (see
-`docs/WHITEPAPER.md` §3, `docs/SCHEDULE.md` Phase 0) — `pipeline.py`
-still calls it today, so `start_hydradb.sh` is still needed for a full
-`contentmaster run` until that phase lands.
 
 ---
 

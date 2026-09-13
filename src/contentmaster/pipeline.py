@@ -1,9 +1,14 @@
 """Orchestrates the full loop (see docs/WHITEPAPER.md §2):
 
-  Cognee -> HydraDB -> RocketRide -> [human review] -> (publish)
+  Cognee -> RocketRide -> [human review] -> (publish)
     -> track metrics -> analysis (cross-validated vs. warehouse history,
     human-confirmed) -> discuss (2 local models propose, 1 synthesizes)
     -> log (Modiqo) -> next run's generation reads it back
+
+("RocketRide" here is legacy naming — RocketRideClient (rocketride_client.py)
+generates drafts by calling the local Ollama LLM directly, not RocketRide's
+own cloud service; see docs/SCHEDULE.md Phase 0. HydraDB was removed
+entirely 2026-09-13 — see docs/LOG.md.)
 
 Run with: contentmaster run --whitepaper "Marketing hack white paper.pdf"
 """
@@ -19,7 +24,6 @@ from .cognee_client import CogneeClient
 from .config import CogneeSettings, settings
 from .discuss import synthesize_strategy
 from .human_loop import ReviewInterrupted, review_draft
-from .hydradb_client import HydraDBClient
 from .modiqo_play import capture_failure, capture_success, find_play
 from .platforms.base import PlatformAPIError, PlatformConfigError
 from .platforms.registry import PLATFORMS, get_platform
@@ -62,18 +66,6 @@ def step1_cognee_extract(whitepaper_path: str, dataset_label: str, product_name:
             if isinstance(text, str) and text.strip():
                 return text.strip()
     return ""
-
-
-def step2_hydradb_persist(product_name: str, features: list[str], icp: str) -> None:
-    """HydraDB: durable Product -[:HAS_FEATURE]-> Feature and Product -[:TARGETS]-> ICP graph."""
-    db = HydraDBClient()
-    for feature in features:
-        db.link("Product", product_name, {"name": product_name}, "HAS_FEATURE",
-                 "Feature", feature, {"text": feature})
-    db.link("Product", product_name, {"name": product_name}, "TARGETS",
-             "ICP", icp, {"description": icp})
-    audit.log_event("hydradb", "graph.persisted", product=product_name,
-                     n_features=len(features), icp=icp)
 
 
 def step3_rocketride_or_replay(
@@ -195,13 +187,16 @@ def step7a_analyze_and_discuss(product_name: str, channel: str, metrics: dict[st
 
 def step7_modiqo_capture(product_name: str, channel: str, final_text: str,
                           metrics: dict[str, Any], approved: bool, reviewer_note: str) -> None:
-    db = HydraDBClient()
     analysis, next_strategy = step7a_analyze_and_discuss(product_name, channel, metrics)
     if approved and metrics.get("ctr", 0) >= SUCCESS_CTR_THRESHOLD:
         play = capture_success(product_name, channel, final_text, metrics, reviewer_note,
                                 improvement_note=next_strategy, analysis=analysis.as_dict())
-        db.link("Product", product_name, {"name": product_name}, "HAS_PLAY",
-                 "Play", f"{product_name}::{channel}", {"channel": channel, "runs": play["runs"]})
+        # (No HydraDB write here anymore — HydraDB is retired, see
+        # docs/WHITEPAPER.md §3 / docs/SCHEDULE.md Phase 0. capture_success()
+        # above already durably persists this to plays/*.json +
+        # plays/_history.jsonl, which is what analysis.py actually reads —
+        # the old HAS_PLAY graph edge was a secondary index, not the
+        # source of truth, so nothing is lost by dropping it.)
         audit.log_event("modiqo", "success.captured", product=product_name, channel=channel,
                          runs=play["runs"])
     else:
@@ -213,7 +208,7 @@ def step7_modiqo_capture(product_name: str, channel: str, final_text: str,
 
 
 def run(whitepaper_path: str, channel: str = "x", product_name: str | None = None,
-        features: list[str] | None = None, icp: str = "B2B deep-tech teams") -> None:
+        features: list[str] | None = None) -> None:
     audit.log_event("pipeline", "run.start", whitepaper=whitepaper_path, channel=channel)
 
     # Steps 1: Cognee. (Falls back to caller-supplied product/features if the
@@ -228,9 +223,6 @@ def run(whitepaper_path: str, channel: str = "x", product_name: str | None = Non
     except Exception as e:  # noqa: BLE001 — surfaced to the operator, pipeline continues
         audit.log_event("cognee", "extract.failed", error=str(e))
         print(f"[warn] Cognee extraction failed ({e}); continuing with supplied product info.")
-
-    # Step 2: HydraDB
-    step2_hydradb_persist(product_name, features, icp)
 
     # Step 3: RocketRide (or Modiqo replay) — grounded in Cognee's real
     # extraction when available, so drafts reflect the uploaded document.

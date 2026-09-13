@@ -89,9 +89,10 @@ diagram. See `src/contentmaster/pipeline.py`.
 
 **Deliberately not used going forward:** RocketRide.ai (Cloud UI friction,
 and the real pipeline never actually depended on it — see
-`docs/ERROR_LOG.md`), HydraDB (superseded by LanceDB for memory; the
-project's own graph-relationship needs don't require a separate graph DB),
-hotdata.dev (superseded by DuckDB/dbt), Snyk stays (kept deliberately —
+`docs/ERROR_LOG.md`), HydraDB (**removed from `pipeline.py` 2026-09-13** —
+superseded by LanceDB for memory; the project's own graph-relationship
+needs don't require a separate graph DB), hotdata.dev (**removed
+2026-09-13** — superseded by DuckDB/dbt), Snyk stays (kept deliberately —
 security scanning has standalone value regardless of this pivot).
 
 ## 4. Model improvement, longer-term

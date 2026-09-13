@@ -203,3 +203,58 @@ cross-reference back here.
   `plays/your-best-stress-reliever::bluesky.json` (runs 1→2) and
   `plays/_history.jsonl` — left in place rather than reverted, consistent
   with the existing seeded test data already in `plays/`.
+
+## 2026-09-13 (later) — Removed HydraDB from pipeline.py; two stray Claude Code plugins uninstalled
+
+- User noticed `pipeline.py` still importing `rocketride_client`,
+  `hydradb_client`, `modiqo_play` despite the whitepaper saying HydraDB/
+  RocketRide aren't used going forward, and asked why. Investigated and
+  found `step2_hydradb_persist()` was the actual, concrete reason
+  `contentmaster run` had been crashing every time since the local HydraDB
+  Docker container was deleted in an earlier cleanup pass — a real bug,
+  not just stale naming. Removed it (call + function definition + import)
+  and the redundant `HAS_PLAY` graph write in `step7_modiqo_capture`
+  (`capture_success()` was already the real source of truth via
+  `plays/*.json` + `plays/_history.jsonl`, so nothing was lost). Also
+  dropped the now-unused `icp` parameter from `run()`. Verified live: a
+  real `contentmaster run` against `Demo-white paper/cat.rtf` now gets
+  past Cognee straight into draft generation with no HydraDB event/crash
+  at all — confirms the fix, not just a clean compile.
+  `hydradb_client.py` itself left in place, unimported (same dead-code
+  treatment as `hotdata_client.py`/`src/automarketer/` — `rm` blocked
+  here, manual delete command given to the user).
+- rocketride_client.py's real role clarified but not yet renamed
+  (tracked in `docs/SCHEDULE.md` Phase 0): `RocketRide.draft_posts()`
+  calls the local Ollama LLM directly; the actual RocketRide SDK
+  (`run_pipe()`/`account_info()`) isn't called anywhere in the real
+  `run()` path. The class/file name is legacy from the hackathon and is
+  misleading, but renaming touches enough surface (audit event names,
+  `step3_rocketride_or_replay`'s name) that it's deferred as its own task
+  rather than bundled into this fix.
+- User asked how to grant `rm` permission. Root-caused it: not a Claude
+  Code setting at all — Rote's shell integration
+  (`~/.rote/shell/common/agent_guard.sh`, sourced via `~/.zshrc` ->
+  `~/.rote/shell/init.sh`) detects agent-session env vars (`CLAUDECODE`,
+  `CLAUDE_SESSION_ID`, etc.) and unconditionally shadows `rm`/`curl`/
+  `wget`/`ssh`/`nc`/`node`/`ruby` with functions that just print "Security:
+  ... blocked in workspace" and return 1 — no per-command opt-out exists
+  in the script. Gave the user the one-line fix (remove the `source
+  ~/.rote/shell/init.sh` line from `~/.zshrc`) rather than doing it myself
+  — editing a global, always-loaded shell rc file is a persistent
+  environment change, not a one-off in-repo edit. Recorded in
+  `docs/ERROR_LOG.md` for the next time this class of "why is X blocked"
+  question comes up.
+- Uninstalled two stray Claude Code plugins the user asked about, both
+  user-scope, both unrelated to this repo's own Python code of the same
+  name:
+  - `cognee-memory@cognee` (source: `topoteretes/cognee-integrations`) —
+    this was the thing generating "Cognee memory: recall skipped (auth
+    failed)" noise on nearly every turn all session; distinct from the
+    project's own self-hosted Cognee Docker container, which stays.
+  - `play@play-skills` (source: `modiqo/play`) — Modiqo's own Claude Code
+    plugin; distinct from this project's `src/contentmaster/modiqo_play.py`
+    (the memory/muscle-memory module `analysis.py`/`discuss.py` depend on
+    — explicitly NOT removed, still core).
+  Both via `claude plugin uninstall <name>`; confirmed via `claude plugin
+  list` (now empty). A new session is needed for the SessionStart hook
+  noise to fully stop, since the current process already loaded them.

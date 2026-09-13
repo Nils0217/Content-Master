@@ -6,6 +6,31 @@ where it helps grep), cause, fix, where it lives in code/log.
 
 ---
 
+### Root cause of "Security: rm blocked in workspace" (and curl/wget/ssh/nc/node/ruby too)
+
+**Symptom:** Same as the earlier `rm`-specific entry below, but now with
+the actual cause instead of just "something in this dev environment blocks
+it." Also applies to `curl`, `wget`, `ssh`, `nc`, `node`, `ruby` — all
+print their own "Security: X blocked" variant and return 1.
+**Cause:** Rote's shell integration. `~/.zshrc` sources
+`~/.rote/shell/init.sh`, which (silently, on every new shell) sources
+`~/.rote/shell/common/agent_guard.sh`. That script's `is_agent_session()`
+checks for `CLAUDECODE`, `CLAUDE_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`,
+`CURSOR_SESSION_ID`, `CLINE_SESSION_ID`, `AIDER_SESSION_ID`,
+`ROTE_AGENT_MODE`, `CODEX_*` — if any are set (true for basically any AI
+coding agent, not just when actually using Rote for the task), it
+unconditionally `function`-shadows those commands. There is no per-command
+or session opt-out flag in the script itself.
+**Fix:** Can't be granted/allowed from inside a session — it's a shell
+function, not a Claude Code permission. Remove or comment out the `source
+~/.rote/shell/init.sh` line in `~/.zshrc` (stops Rote's shell integration
+entirely — its tab completion too, not just the guard) and open a new
+shell/session. This is a persistent, global environment change (affects
+every terminal, not just Claude Code), so have the user do it themselves
+rather than editing their `~/.zshrc` automatically.
+
+---
+
 ### improve.py's suggestions were silently based on zeros, not real metrics
 
 **Symptom:** No error, no crash — `generate_improvement_note()`'s prompt

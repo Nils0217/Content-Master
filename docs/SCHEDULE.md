@@ -29,17 +29,39 @@ finished ones (keeps this file useful as a record of intent vs. reality).
 
 ## Phase 0 — retire hackathon-only dependencies
 
-- [ ] Remove `step2_hydradb_persist()` from `pipeline.py` (HydraDB is
-      superseded by LanceDB — see `docs/WHITEPAPER.md` §3). Don't just
-      delete it silently: replace it with a real write to wherever memory
-      lands (LanceDB, once Phase 2 exists), so the loop stays complete.
-- [ ] Replace `hotdata_client.py`'s role with the new `warehouse/` dbt
-      project — `step6_hotdata_metrics()` should write to DuckDB directly
-      (or via a thin wrapper) instead of shelling out to the `hotdata` CLI.
+- [x] Remove `step2_hydradb_persist()` from `pipeline.py`. It had been
+      silently crashing every run (the local HydraDB Docker container was
+      deleted in an earlier cleanup pass, so the call 500'd on connection
+      refused) — this was the actual reason `contentmaster run` couldn't
+      complete. Also dropped the redundant `HAS_PLAY` graph write in
+      `step7_modiqo_capture` (the real source of truth was already
+      `capture_success()` writing to `plays/*.json` +
+      `plays/_history.jsonl`, so nothing was lost). `hydradb_client.py`
+      itself and the local `hydradb-data/` are untouched, just no longer
+      imported by `pipeline.py` — same dead-code treatment as
+      `src/automarketer/`/`hotdata_client.py` (`rm` blocked in this dev
+      environment; delete by hand: `rm -f src/contentmaster/hydradb_client.py`).
+      No LanceDB replacement written yet (Phase 2 isn't built) — the
+      product/feature/ICP graph this step used to persist just isn't
+      recorded anywhere right now, which is the honest state until Phase 2
+      lands, not a silent regression.
+- [x] Replaced `hotdata_client.py`'s role with the new `warehouse/` dbt
+      project — `step6_track_metrics()` (renamed from
+      `step6_hotdata_metrics()`) writes to `metrics/post_metrics.jsonl` via
+      `metrics_store.py`, and `stg_post_metrics.sql` reads it into DuckDB.
+      No CLI, no account. `hotdata_client.py` itself untouched but
+      unimported — same dead-code treatment, delete by hand:
+      `rm -f src/contentmaster/hotdata_client.py`.
 - [ ] Decide what to do with `pipelines/automarketer-content-gen.pipe` and
-      `rocketride_client.py` — the real pipeline never depended on
-      RocketRide's execution, only the demo `.pipe` artifact did. Keep as
-      a historical artifact, or remove.
+      `rocketride_client.py`. Still open: the real `run()` path never
+      depended on RocketRide's execution (`RocketRide.draft_posts()` calls
+      the local Ollama LLM directly — `run_pipe()`/`account_info()`, the
+      only methods that touch the actual RocketRide SDK, aren't called
+      anywhere), so the class/file name is misleading. Rename to something
+      honest (e.g. `draft_generator.py`) once it's worth the churn (touches
+      `step3_rocketride_or_replay`'s name, several audit event names, this
+      file). `pipelines/*.pipe` itself: keep as historical artifact, or
+      remove.
 
 ## Phase 1 — data layer (dbt + DuckDB [+ MotherDuck])
 
