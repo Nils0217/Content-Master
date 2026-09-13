@@ -78,3 +78,19 @@ cross-reference back here.
 - Wrote this log, `docs/SCHEDULE.md`, and `docs/ERROR_LOG.md` — the
   explicit ask being to stop re-discovering the same fixes and to keep
   intent (schedule) separate from what actually happened (this file).
+
+## 2026-09-13 — Packaged as a real CLI
+
+- Added `pyproject.toml` ([project.scripts]) + `src/automarketer/cli.py`
+  so `pip install -e .` registers `automarketer` as an actual command,
+  with `run` and `bluesky verify` subcommands, instead of remembering
+  `./.venv/bin/python run_pipeline.py ...` / `scripts/verify_bluesky.py`
+  paths. Both old entry points kept as thin deprecated wrappers that
+  forward into the same CLI code, so nothing that already worked broke.
+- `requirements.txt` cleaned back down to the package's actual direct
+  dependencies (mirrors `pyproject.toml`) — `pip freeze` had accumulated
+  the entire `dbt-duckdb` transitive tree from the warehouse work, plus a
+  self-referential `-e git+https://github.com/...#egg=automarketer` line
+  from freezing an editable install pointed at this repo's own GitHub
+  remote. Neither belonged in the package's own dependency list — see
+  `docs/ERROR_LOG.md`.

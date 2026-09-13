@@ -4,6 +4,16 @@ Task backlog, roughly ordered. No dates on purpose — see `docs/LOG.md` for
 what's actually been done and when. Check items off in place; don't delete
 finished ones (keeps this file useful as a record of intent vs. reality).
 
+## Phase 0a — packaging
+
+- [x] `pyproject.toml` + `src/automarketer/cli.py`: `automarketer` is now
+      a real installed command (`pip install -e .`), with `run` and
+      `bluesky verify` subcommands. `run_pipeline.py` /
+      `scripts/verify_bluesky.py` kept as deprecated forwarding wrappers.
+- [ ] As Phase 1–7 land, add their subcommands here too instead of new
+      standalone scripts (e.g. `automarketer warehouse build`, once the
+      dbt invocation is worth wrapping).
+
 ## Phase 0 — retire hackathon-only dependencies
 
 - [ ] Remove `step2_hydradb_persist()` from `pipeline.py` (HydraDB is

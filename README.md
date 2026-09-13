@@ -34,10 +34,10 @@ through — a second real input to the knowledge graph, not a separate system.
 
 ```bash
 # 1. connection test only
-./.venv/bin/python scripts/verify_bluesky.py
+automarketer bluesky verify
 
 # 2. + fetch public posts + ingest into Cognee
-./.venv/bin/python scripts/verify_bluesky.py --search "AI agents" --limit 3
+automarketer bluesky verify --search "AI agents" --limit 3
 ```
 
 Requires `BLUESKY_HANDLE` and `BLUESKY_APP_PASSWORD` (an **app password**
@@ -54,10 +54,24 @@ Verified live: auth succeeded, 3 real posts fetched, and
 `add_document()` already used for the PDF, just called with `raw_data`
 strings instead of a file.
 
+## Install the CLI
+
+```bash
+./.venv/bin/pip install -e .
+```
+
+This registers `automarketer` as a proper command (`./.venv/bin/automarketer`,
+or bare `automarketer` once the venv is active — `source .venv/bin/activate`).
+`pyproject.toml`'s `[project.scripts]` entry point is what does this;
+`src/automarketer/cli.py` is the dispatcher — add a new subcommand there as
+the project grows (keep the actual logic in the relevant module, cli.py
+stays thin). The old `run_pipeline.py` / `scripts/verify_bluesky.py`
+entry points still work — they just forward to the same CLI now.
+
 ## Run it
 
 ```bash
-./.venv/bin/python run_pipeline.py --whitepaper "Marketing hack white paper.pdf" --channel x --product-name "AutoMarketer.ai"
+automarketer run --whitepaper "Marketing hack white paper.pdf" --channel x --product-name "AutoMarketer.ai"
 ```
 
 First run generates cold-start drafts. Run it again with the same
@@ -89,13 +103,15 @@ still fits comfortably alongside Docker on an 8GB machine.
 
 ```
 .env                         # all credentials/config (gitignored)
+pyproject.toml                # packaging + the `automarketer` CLI entry point
 requirements.txt
-run_pipeline.py               # CLI entrypoint
+run_pipeline.py               # deprecated — forwards to `automarketer run`
 scripts/
   configure_cognee_llm.sh     # (re)start Cognee wired to Ollama
   start_hydradb.sh            # start the local HydraDB graph-node
-  verify_bluesky.py           # Bluesky connection test + fetch + Cognee ingest
+  verify_bluesky.py           # deprecated — forwards to `automarketer bluesky verify`
 src/automarketer/
+  cli.py                       # `automarketer` CLI dispatcher — thin, no real logic of its own
   config.py                   # loads .env into typed settings
   cognee_client.py             # layer 1
   bluesky_client.py             # extra data source -> feeds layer 1's ingest
@@ -108,6 +124,8 @@ src/automarketer/
   pipeline.py                   # orchestrator
 plays/                        # captured muscle-memory patterns (per product+channel)
 audit/events.jsonl            # audit log
+warehouse/                    # dbt + DuckDB (+ MotherDuck) analytics — see warehouse/README.md
+docs/                          # WHITEPAPER.md, SCHEDULE.md, LOG.md, ERROR_LOG.md
 ```
 
 ## RocketRide: how the `.pipe` file was actually built

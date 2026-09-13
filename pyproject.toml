@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "automarketer"
+version = "0.1.0"
+description = "Compound marketing agent: extract -> draft -> review -> publish -> track -> improve, with real memory."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests",
+    "python-dotenv",
+    "atproto",
+    "striprtf",
+    "rocketride",   # only used by rocketride_client.py — see docs/SCHEDULE.md Phase 0
+]
+
+[project.optional-dependencies]
+# Analytics layer (warehouse/) — separate from the core package, only
+# needed if you're running `dbt` yourself. See warehouse/README.md.
+warehouse = ["dbt-duckdb"]
+
+[project.scripts]
+automarketer = "automarketer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

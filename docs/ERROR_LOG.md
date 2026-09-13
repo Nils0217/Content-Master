@@ -6,6 +6,25 @@ where it helps grep), cause, fix, where it lives in code/log.
 
 ---
 
+### `pip freeze` after `pip install -e .` pollutes requirements.txt
+
+**Symptom:** `requirements.txt` gains a line like
+`-e git+https://github.com/<you>/<repo>.git@<sha>#egg=automarketer` plus
+the entire dependency tree of anything else installed in the venv (e.g.
+`dbt-duckdb`'s ~40 transitive packages), even though the package's actual
+direct dependencies are five packages.
+**Cause:** `pip freeze` dumps everything installed in the environment,
+including the editable package itself (as a git-remote reference) and
+whatever else happens to share the venv (dbt/duckdb, installed for
+`warehouse/` — unrelated to the core package).
+**Fix:** Don't regenerate `requirements.txt` via blind `pip freeze` once
+`pyproject.toml` exists. `requirements.txt` should mirror
+`pyproject.toml`'s `[project.dependencies]` by hand (or via `pip-compile`
+from a proper `.in` file, if that tooling gets added later) — not be
+whatever happens to be installed in the venv this session.
+
+---
+
 ### dbt: `Error: Invalid value for '--profiles-dir': Path 'warehouse' does not exist`
 
 **Symptom:** `dbt run` fails immediately with this, even though

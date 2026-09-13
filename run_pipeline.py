@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Entry point. Usage:
+"""Deprecated entry point — kept so old muscle memory still works. Prefer:
 
-  ./.venv/bin/python run_pipeline.py --whitepaper "Marketing hack white paper.pdf" --channel x
+    ./.venv/bin/automarketer run --whitepaper "..." --channel x
+
+(after `./.venv/bin/pip install -e .` — see README.md). This file just
+forwards to the same code.
 """
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from automarketer.pipeline import main  # noqa: E402
+from automarketer.cli import main as _cli_main  # noqa: E402
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(_cli_main(["run"] + sys.argv[1:]))
