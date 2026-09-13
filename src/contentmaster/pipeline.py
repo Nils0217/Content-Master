@@ -1,7 +1,7 @@
 """Orchestrates the full loop from the white paper (§3):
 
   Cognee -> HydraDB -> RocketRide -> [human review] -> (publish)
-    -> hotdata.dev -> Modiqo -> write back to HydraDB
+    -> track metrics -> Modiqo -> write back to HydraDB
 
 Run with: contentmaster run --whitepaper "Marketing hack white paper.pdf"
 """
@@ -11,10 +11,9 @@ import re
 from pathlib import Path
 from typing import Any
 
-from . import audit
+from . import audit, metrics_store
 from .cognee_client import CogneeClient
 from .config import CogneeSettings, settings
-from .hotdata_client import HotdataClient
 from .human_loop import ReviewInterrupted, review_draft
 from .hydradb_client import HydraDBClient
 from .improve import generate_improvement_note
@@ -133,18 +132,17 @@ def step5_publish(draft: dict[str, Any], final_text: str) -> dict[str, Any]:
     return published
 
 
-def step6_hotdata_metrics(published: dict[str, Any], channel: str) -> dict[str, Any]:
-    """White paper §5 MVP scope: hotdata.dev returns metrics "透過模擬或簡單真實數據"
-    (simulated or simple real data). When step5 actually posted to a real
-    platform, this pulls real engagement back from it and that's what gets
-    written through hotdata.dev; otherwise (a channel with no implemented
-    adapter, or a publish that fell back to simulated) a simulated reading
-    is used instead. Either way hotdata.dev itself does genuine
-    storage+query work (a real CLI `load --append` call, then a real
-    `hotdata query` read).
+def step6_track_metrics(published: dict[str, Any], channel: str) -> dict[str, Any]:
+    """Pulls real engagement back when step5 actually posted to a real
+    platform; otherwise (a channel with no implemented adapter, or a
+    publish that fell back to simulated) records a clearly-labeled
+    simulated reading instead. Either way this writes a real row to
+    metrics/post_metrics.jsonl, which warehouse/'s dbt project reads
+    directly off disk (see warehouse/models/staging/stg_post_metrics.sql)
+    — no CLI, no account, no live DB connection needed here (hotdata.dev
+    filled this role before; retired, see docs/SCHEDULE.md Phase 0).
     """
     post_id = published["id"]
-    hd = HotdataClient()
     reading = None
     if published.get("post_ref") and channel in PLATFORMS:
         try:
@@ -153,7 +151,6 @@ def step6_hotdata_metrics(published: dict[str, Any], channel: str) -> dict[str, 
             impressions = max(real["like_count"] + real["repost_count"] + real["reply_count"], 1)
             reading = {
                 "source": f"{channel} (live)",
-                "post_id": post_id,
                 "impressions": impressions,  # not every platform exposes impressions; approximated from engagement
                 "clicks": real["like_count"],
                 "conversions": real["repost_count"],
@@ -164,10 +161,10 @@ def step6_hotdata_metrics(published: dict[str, Any], channel: str) -> dict[str, 
             print(f"[warn] Could not pull {channel} metrics ({e}); falling back to simulated reading.")
 
     if reading is None:
-        reading = hd._mock_metrics(post_id)  # stand-in for live engagement data
-    hd.write_metrics(post_id, channel, reading)
-    metrics = hd.get_metrics(post_id)
-    audit.log_event("hotdata", "metrics.fetched", post_id=post_id, metrics=metrics)
+        reading = metrics_store.mock_metrics(post_id)
+    metrics_store.write_metrics(post_id, channel, reading)
+    metrics = metrics_store.get_metrics(post_id)
+    audit.log_event("metrics", "recorded", post_id=post_id, metrics=metrics)
     return metrics
 
 
@@ -222,7 +219,7 @@ def run(whitepaper_path: str, channel: str = "x", product_name: str | None = Non
     # extraction when available, so drafts reflect the uploaded document.
     drafts = step3_rocketride_or_replay(product_name, features, channel, context=context)
 
-    # Steps 4-7: human review -> publish -> hotdata -> Modiqo, per draft
+    # Steps 4-7: human review -> publish -> track metrics -> Modiqo, per draft
     results: list[dict[str, Any]] = []
     for i, draft in enumerate(drafts, start=1):
         print(f"\n########## Draft {i} of {len(drafts)} ##########")
@@ -237,7 +234,7 @@ def run(whitepaper_path: str, channel: str = "x", product_name: str | None = Non
             results.append({"draft": i, "status": "rejected", "text": draft["text"], "channel": channel})
             continue
         published = step5_publish(draft, decision.final_text)
-        metrics = step6_hotdata_metrics(published, channel)
+        metrics = step6_track_metrics(published, channel)
         step7_modiqo_capture(product_name, channel, decision.final_text, metrics,
                               approved=True, reviewer_note=decision.reviewer_note)
         results.append({
