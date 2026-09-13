@@ -137,3 +137,69 @@ cross-reference back here.
   `scripts/verify_bluesky.py` wrapper (now forwarding to `connect bluesky`)
   still works too; `dbt run` still builds all 4 models after the
   warehouse rename.
+
+## 2026-09-13 — Real analysis step: track -> analysis -> discuss -> log
+
+- User flagged a real gap: the old loop went straight from one post's raw
+  numbers to a single local model's "improve" suggestion — no comparison
+  against history, no check on whether the *previous* suggestion actually
+  correlated with anything moving. Agreed this wasn't analysis, it was one
+  model guessing from N=1; open-ended multi-turn model debate was pushed
+  back on (same-model self-debate mostly just agrees with itself, and cost
+  scales badly) in favor of one bounded round: 2 different local models
+  propose, 1 synthesizes.
+- Root cause of "no history to analyze against": `plays/*.json` is a
+  snapshot overwritten every run — at most one data point per
+  product/channel, ever. Fixed first, since analysis is impossible without
+  it: `modiqo_play.py` now also appends every successful capture to
+  `plays/_history.jsonl` (append-only), backfilled from the two existing
+  play snapshots. New dbt models `stg_success_history.sql` +
+  `performance_history.sql` (union of published-over-time + rejections)
+  give analysis.py a real timeline to query — not just campaign_
+  performance's current-state snapshot.
+- `src/contentmaster/analysis.py` (new): queries
+  warehouse/local.duckdb's `performance_history` for this product/channel,
+  computes n_prior_posts / historical_avg_ctr / trend (labeled
+  "insufficient_for_trend" below n=2 — no fabricated confidence from tiny
+  samples) / whether the *previous* improvement_note's suggestion looks
+  like it correlated with ctr moving, then — human-in-the-loop, as
+  requested — prints the verdict and lets a human confirm or override it
+  (`Y/n`, same input() pattern as human_loop.py, reusing
+  `ReviewInterrupted` for clean Ctrl-C/EOF handling) before discuss.py
+  trusts it.
+- `src/contentmaster/discuss.py` (new): 2 real, different local models
+  (llama3.2:3b + mistral:latest — both already pulled, no new download)
+  each independently propose a next-round strategy grounded in the
+  analysis; a 3rd pass (llama3.2:3b, cheapest) synthesizes them into one
+  instruction, naming where they agreed/disagreed. Every call logged
+  individually via audit.log_event. One bounded round, not an unbounded
+  chat — deliberate, see the module docstring.
+- `pipeline.py`: `step7_modiqo_capture` now calls
+  `step7a_analyze_and_discuss` (analysis + discuss) instead of the old
+  single-model `step7b_llm_improve`; the resulting strategy is stored as
+  `improvement_note` (so `rocketride_client.py`'s existing
+  `prior.get("improvement_note")` read picks it up with no changes needed
+  there) plus a new `analysis` dict alongside it on both the play snapshot
+  and the history ledger. The per-draft `try/except ReviewInterrupted` in
+  `run()` was widened to cover step7 too, since analysis's human
+  confirmation is a second interrupt point, not just step4's draft review.
+- Also fixed, found while wiring this up: `improve.py` (the now-superseded
+  single-model step, kept importable) built its prompt from
+  `metrics.get('like_count'/'repost_count'/'reply_count')`, but the metrics
+  dict it's actually called with uses `impressions/clicks/conversions/ctr`
+  — every suggestion it ever produced was silently based on zeros, not the
+  real numbers. See `docs/ERROR_LOG.md`.
+- Verified live, full chain: `analyze_performance()` against the real
+  warehouse (n_prior_posts=1, trend=insufficient_for_trend, correctly
+  identified the prior suggestion as "looks_effective") → human confirmed
+  → `synthesize_strategy()` produced two genuinely different model
+  proposals + a synthesis → `capture_success()` persisted the analysis
+  dict on both the snapshot and history files → re-ran `dbt run` →
+  `analyze_performance()` again now sees n_prior_posts=2 and a real
+  computed `trend: improving` — the loop closes and compounds, not just a
+  diagram.
+
+  Test data note: this test run wrote a real (test) entry into
+  `plays/your-best-stress-reliever::bluesky.json` (runs 1→2) and
+  `plays/_history.jsonl` — left in place rather than reverted, consistent
+  with the existing seeded test data already in `plays/`.

@@ -27,13 +27,19 @@ entry points still work — they just forward to the same CLI now.
 contentmaster run --whitepaper "Marketing hack white paper.pdf" --channel x --product-name "AutoMarketer.ai"
 ```
 
-First run generates cold-start drafts. Run it again with the same
-product+channel and check the log for `"improving_on_prior": true` —
-Modiqo's captured play (last winning post + its real pulled metrics + the
-LLM's own improvement note) gets fed back into the prompt, so the new
-drafts actually act on what worked/didn't, instead of being a cold start
-or a frozen replay. That's the compounding proof: content that gets better
-each run, not just cheaper.
+First run generates cold-start drafts. After a post publishes, the loop
+doesn't just ask one model to guess an improvement from that single
+post's numbers — `analysis.py` cross-validates against this
+product/channel's real history in the warehouse (`dbt run` in
+`warehouse/` first — see below) and prints its verdict for you to confirm
+or override, then `discuss.py` has two different local models each
+propose a next-round strategy and a third synthesize them. Run it again
+with the same product+channel and check the log for
+`"improving_on_prior": true` — that synthesized strategy gets fed back
+into the prompt, so the new drafts act on what actually worked, not a
+cold start or a frozen replay. That's the compounding proof: content that
+gets better each run, not just cheaper. See `docs/WHITEPAPER.md` §2 for
+the full track → analysis → discuss → log diagram.
 
 Every event is written to `audit/events.jsonl` (one JSON line per step).
 
@@ -89,10 +95,12 @@ src/contentmaster/
     bluesky.py                    # first implementation
     registry.py                   # name -> Platform class; PLATFORMS / PLANNED_PLATFORMS
   hydradb_client.py            # layer 2 (+ OpenCypher subset notes)
-  hotdata_client.py            # layer 3 (real CLI writes + queries)
+  metrics_store.py             # layer 3 — local JSONL, read by warehouse/ dbt (hotdata.dev retired)
   rocketride_client.py         # layer 4
-  human_loop.py                 # brand-safety gate
-  modiqo_play.py                # layer 5 (muscle memory)
+  human_loop.py                 # brand-safety gate (draft review)
+  analysis.py                    # track -> ANALYSIS: cross-validate vs. warehouse history, human-confirmed
+  discuss.py                      # ANALYSIS -> DISCUSS: 2 local models propose, 1 synthesizes
+  modiqo_play.py                # layer 5 (muscle memory) — snapshot + append-only history ledger
   audit.py                      # JSONL audit log
   pipeline.py                   # orchestrator
 plays/                        # captured muscle-memory patterns (per product+channel)

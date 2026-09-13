@@ -1,7 +1,9 @@
-"""Orchestrates the full loop from the white paper (§3):
+"""Orchestrates the full loop (see docs/WHITEPAPER.md §2):
 
   Cognee -> HydraDB -> RocketRide -> [human review] -> (publish)
-    -> track metrics -> Modiqo -> write back to HydraDB
+    -> track metrics -> analysis (cross-validated vs. warehouse history,
+    human-confirmed) -> discuss (2 local models propose, 1 synthesizes)
+    -> log (Modiqo) -> next run's generation reads it back
 
 Run with: contentmaster run --whitepaper "Marketing hack white paper.pdf"
 """
@@ -12,11 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from . import audit, metrics_store
+from .analysis import analyze_performance
 from .cognee_client import CogneeClient
 from .config import CogneeSettings, settings
+from .discuss import synthesize_strategy
 from .human_loop import ReviewInterrupted, review_draft
 from .hydradb_client import HydraDBClient
-from .improve import generate_improvement_note
 from .modiqo_play import capture_failure, capture_success, find_play
 from .platforms.base import PlatformAPIError, PlatformConfigError
 from .platforms.registry import PLATFORMS, get_platform
@@ -168,29 +171,43 @@ def step6_track_metrics(published: dict[str, Any], channel: str) -> dict[str, An
     return metrics
 
 
-def step7b_llm_improve(product_name: str, channel: str, final_text: str, metrics: dict[str, Any]) -> str:
-    """Ask the local LLM for one concrete improvement given this post's real
-    (or simulated) metrics. Stored on the play record so the next run's
-    RocketRide instructions/prompt can be built with it in mind.
+def step7a_analyze_and_discuss(product_name: str, channel: str, metrics: dict[str, Any]) -> tuple[Any, str]:
+    """track (already done — `metrics` is step6's output) -> ANALYSIS ->
+    DISCUSS -> (log happens in step7_modiqo_capture, right after).
+
+    Replaces the old single-model "improve" step, which asked one local
+    LLM to eyeball this post's raw numbers and guess a suggestion — no
+    comparison against history, no check on whether the *previous*
+    suggestion actually correlated with anything moving. Now: analysis.py
+    cross-validates against this product/channel's real timeline in the
+    warehouse (with a human confirmation gate — see analysis.py), and
+    discuss.py has two *different* local models each propose a strategy
+    grounded in that analysis, synthesized into one final instruction —
+    real model diversity, not one model talking to itself.
     """
-    note = generate_improvement_note(product_name, channel, final_text, metrics)
-    audit.log_event("improve", "note.generated", product=product_name, channel=channel, note=note)
-    return note
+    analysis = analyze_performance(product_name, channel, metrics.get("ctr", 0.0), interactive=True)
+    audit.log_event("analysis", "recorded", product=product_name, channel=channel,
+                     trend=analysis.trend, n_prior_posts=analysis.n_prior_posts,
+                     human_confirmed=analysis.human_confirmed)
+    next_strategy = synthesize_strategy(product_name, channel, analysis)
+    return analysis, next_strategy
 
 
 def step7_modiqo_capture(product_name: str, channel: str, final_text: str,
                           metrics: dict[str, Any], approved: bool, reviewer_note: str) -> None:
     db = HydraDBClient()
-    improvement_note = step7b_llm_improve(product_name, channel, final_text, metrics)
+    analysis, next_strategy = step7a_analyze_and_discuss(product_name, channel, metrics)
     if approved and metrics.get("ctr", 0) >= SUCCESS_CTR_THRESHOLD:
-        play = capture_success(product_name, channel, final_text, metrics, reviewer_note, improvement_note)
+        play = capture_success(product_name, channel, final_text, metrics, reviewer_note,
+                                improvement_note=next_strategy, analysis=analysis.as_dict())
         db.link("Product", product_name, {"name": product_name}, "HAS_PLAY",
                  "Play", f"{product_name}::{channel}", {"channel": channel, "runs": play["runs"]})
         audit.log_event("modiqo", "success.captured", product=product_name, channel=channel,
                          runs=play["runs"])
     else:
         reason = reviewer_note or f"ctr {metrics.get('ctr')} below threshold {SUCCESS_CTR_THRESHOLD}"
-        capture_failure(product_name, channel, final_text, reason, improvement_note)
+        capture_failure(product_name, channel, final_text, reason,
+                         improvement_note=next_strategy, analysis=analysis.as_dict())
         audit.log_event("modiqo", "failure.captured", product=product_name, channel=channel,
                          reason=reason)
 
@@ -225,18 +242,21 @@ def run(whitepaper_path: str, channel: str = "x", product_name: str | None = Non
         print(f"\n########## Draft {i} of {len(drafts)} ##########")
         try:
             decision = step4_human_review(draft)
+            if not decision.approved:
+                capture_failure(product_name, channel, draft["text"], decision.reviewer_note or "rejected")
+                results.append({"draft": i, "status": "rejected", "text": draft["text"], "channel": channel})
+                continue
+            published = step5_publish(draft, decision.final_text)
+            metrics = step6_track_metrics(published, channel)
+            # step7 also has a human-in-the-loop gate (analysis confirmation,
+            # see analysis.py) — kept inside this same try so an interrupt
+            # there stops just as cleanly as one during draft review.
+            step7_modiqo_capture(product_name, channel, decision.final_text, metrics,
+                                  approved=True, reviewer_note=decision.reviewer_note)
         except ReviewInterrupted:
             print(f"\n[stopped] Review interrupted at draft {i} of {len(drafts)} — "
                   f"{len(drafts) - i} remaining draft(s) skipped.")
             break
-        if not decision.approved:
-            capture_failure(product_name, channel, draft["text"], decision.reviewer_note or "rejected")
-            results.append({"draft": i, "status": "rejected", "text": draft["text"], "channel": channel})
-            continue
-        published = step5_publish(draft, decision.final_text)
-        metrics = step6_track_metrics(published, channel)
-        step7_modiqo_capture(product_name, channel, decision.final_text, metrics,
-                              approved=True, reviewer_note=decision.reviewer_note)
         results.append({
             "draft": i,
             "status": published["status"],

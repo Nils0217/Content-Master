@@ -44,19 +44,29 @@ any input (doc / video / code / podcast)
             touching pipeline.py — see README.md "Platforms")
         │
         ▼
-   pull real results (likes / reposts / replies against a human-set KPI)
+   track: pull real results (likes / reposts / replies against a
+          human-set KPI)
         │
         ▼
-   log (DuckDB, via dbt)
+   analysis: cross-validate against this product/channel's real history
+             in the warehouse (DuckDB, via dbt) — was the last
+             suggestion actually followed by better numbers, what's the
+             trend — then a human confirms or overrides the verdict
+             (src/contentmaster/analysis.py; small sample sizes mean this
+             stays human-checked, not blindly trusted)
         │
         ▼
-   propose improvement (local LLM, given the real result)
+   discuss: 2 different local models each propose a next-round strategy
+            grounded in that analysis, a 3rd synthesizes them into one —
+            real model diversity, not one model guessing from N=1
+            (src/contentmaster/discuss.py)
         │
         ▼
-   write to memory ──────────────────────────────────┐
-        │                                             │
-        ▼                                             │
-   next round's generation reads this memory ◀────────┘
+   log: this run's result + the analysis + the synthesized strategy,
+        written to memory ──────────────────────────────────┐
+        │                                                    │
+        ▼                                                    │
+   next round's generation reads this memory back ◀──────────┘
 ```
 
 This is a real, running loop today (text-only, Bluesky-only) — not just a

@@ -6,6 +6,58 @@ where it helps grep), cause, fix, where it lives in code/log.
 
 ---
 
+### improve.py's suggestions were silently based on zeros, not real metrics
+
+**Symptom:** No error, no crash — `generate_improvement_note()`'s prompt
+always showed "0 likes, 0 reposts, 0 replies" regardless of the post's
+actual performance, so every suggestion it ever produced was disconnected
+from the real numbers.
+**Cause:** The function read `metrics.get('like_count'/'repost_count'/
+'reply_count')`, but the `metrics` dict it's actually called with (from
+`pipeline.py`'s track step / `metrics_store`) uses a different shape:
+`impressions/clicks/conversions/ctr`. Wrong keys just silently `.get()`
+their way to the `0` default — no exception, nothing to notice.
+**Fix:** Use the correct field names
+(`clicks`/`conversions`/`ctr`/`impressions`). Found while building
+`analysis.py`/`discuss.py` to replace this step's role — a reminder that a
+`dict.get(key, default)` on a metrics/result dict is exactly the kind of
+mismatch that won't announce itself; when wiring a new consumer onto an
+existing metrics shape, print/assert the actual keys once rather than
+trusting the field names in an older call site.
+
+---
+
+### DuckDB: `select ... from read_json_auto(...)` — column referenced before it's defined / column doesn't exist
+
+**Symptom 1:** `Binder Error: Column "ts" referenced that exists in the
+SELECT clause - but this column cannot be referenced before it is
+defined`, from a query like `select try_cast(ts as timestamp) as ts, ...
+from read_json_auto(...)`.
+**Symptom 2 (after wrapping in a CTE to dodge symptom 1):** `Binder Error:
+Values list "raw" does not have a column named "ts"` — happens
+specifically when the JSON source file's *current* rows genuinely don't
+contain that field yet (e.g. a field just added to the writer, with zero
+existing rows using it). `read_json_auto`/`read_json(..., union_by_name=
+true)` infer the schema from what's actually in the file; a column absent
+from every current row isn't inferred as null, it's not in the schema at
+all.
+**Cause:** Two different problems that look similar. #1 is disambiguation
+between a source column and the alias defined for it in the same SELECT
+list — DuckDB's binder didn't resolve it the way plain SQL name-scoping
+rules would suggest. #2 is genuine — the column really isn't in the
+inferred schema yet.
+**Fix:** For #1, put the source read in a CTE and qualify the column
+(`with raw as (select * from read_json_auto(...)) select
+try_cast(raw.ts as timestamp) as ts, ... from raw`) — but that alone
+doesn't fix #2. For #2 (the actual fix needed when a field is newly added
+and old rows predate it), use `read_json` (not `_auto`) with an explicit
+`columns := {...}` schema map instead of relying on inference — this
+forces every declared column to exist (null where absent from a given
+row) regardless of what's actually present in the file today. See
+`warehouse/models/staging/stg_failures.sql`.
+
+---
+
 ### `rm` is blocked in this dev environment: `Security: rm blocked in workspace`
 
 **Symptom:** Any `rm` (even `rm -rf` on something clearly disposable, or a

@@ -47,11 +47,18 @@ finished ones (keeps this file useful as a record of intent vs. reality).
       `cloud` (MotherDuck) targets
 - [x] Staging models for `plays/*.json`, `plays/_failures.jsonl`,
       `audit/events.jsonl`
-- [x] `campaign_performance` mart (published + rejected, unioned)
+- [x] `campaign_performance` mart (published + rejected, unioned) —
+      current-state snapshot, at most 1 published row per product/channel
+- [x] `performance_history` mart + `stg_success_history` (reads new
+      `plays/_history.jsonl`, an append-only ledger — see Phase 9) — the
+      real timeline `analysis.py` cross-validates against; unlike
+      `campaign_performance`, this actually accumulates over multiple runs
 - [ ] Add dbt tests (not-null, accepted-values on `status`, etc.)
 - [ ] Seed one real external CSV (news/current-events data) and join it
-      against `campaign_performance` in a model — the first real use of
-      `warehouse/seeds/`
+      against `performance_history` in a model — the first real use of
+      `warehouse/seeds/`, and the "cross validate against other data" half
+      of Phase 9's analysis step that isn't built yet (only the
+      within-product-history half is)
 - [ ] Decide the MotherDuck cutover trigger (data volume? multiple
       contributors? just do it once curious) and actually do it once
       reached
@@ -123,3 +130,56 @@ finished ones (keeps this file useful as a record of intent vs. reality).
       time to this phase
 - [ ] Periodic (e.g. monthly) batch fine-tune, evaluated against the
       previous version before it replaces it — never online/continuous
+
+## Phase 9 — analysis & discuss (track -> analysis -> discuss -> log)
+
+- [x] `plays/_history.jsonl`: append-only ledger of every successful
+      capture (see `modiqo_play._append_history()`), backfilled from the
+      pre-existing play snapshots. Without this, "did the last suggestion
+      help" and "what's the trend" were both unanswerable —
+      `plays/*.json` alone is a snapshot with at most 1 data point per
+      product/channel, ever.
+- [x] `warehouse/models/staging/stg_success_history.sql` +
+      `models/marts/performance_history.sql` — the real timeline mart
+      built from that ledger (+ `stg_failures`), which `analysis.py`
+      queries.
+- [x] `src/contentmaster/analysis.py`: cross-validates the current run's
+      ctr against this product/channel's real history (n_prior_posts,
+      historical_avg_ctr, trend — labeled `insufficient_for_trend` below
+      n=2 rather than a fabricated verdict from a tiny sample) and whether
+      the *previous* improvement_note's suggestion looks like it
+      correlated with ctr moving. Human-in-the-loop by default
+      (`interactive=True`) — prints the verdict, lets a human confirm or
+      override before `discuss.py` trusts it.
+- [x] `src/contentmaster/discuss.py`: 2 different local models
+      (llama3.2:3b + mistral:latest) each independently propose a
+      next-round strategy grounded in the analysis; a 3rd pass
+      synthesizes them into one instruction. One bounded round —
+      deliberately not an open-ended multi-turn debate (cost/latency
+      multiply for real, audit trail gets harder to follow, and
+      same-model self-debate doesn't add real cross-validation anyway).
+- [x] `pipeline.py` wired: `step7_modiqo_capture` now calls
+      `step7a_analyze_and_discuss` instead of the old single-model
+      `step7b_llm_improve` (removed); the synthesized strategy is stored
+      under the existing `improvement_note` key (so
+      `rocketride_client.py`'s prompt-building needed no change) plus a
+      new `analysis` dict alongside it, on both the snapshot and the
+      history ledger.
+- [ ] **Cross-validate against *other* data, not just this
+      product/channel's own history** — the user's original ask included
+      this ("gather 成效, other data in the motherDB, and cross validate
+      them"); only the within-product-history half is built. Needs real
+      external data seeded into the warehouse first (see Phase 1's seeds
+      item) before there's anything to cross-validate against.
+- [ ] `analyze_performance(interactive=...)` / `synthesize_strategy(...)`
+      have no CLI-level way to run non-interactively yet (e.g. for a
+      scripted/batch mode) — `interactive=False` works as a function
+      argument, but nothing in `cli.py`/`pipeline.run()` exposes a flag
+      for it.
+- [ ] `discuss.py`'s judge defaults to the same model as "Advisor A"
+      (`DISCUSS_JUDGE_MODEL` defaults to `DISCUSS_MODEL_A`) purely because
+      it's the cheaper/faster of the two locally available models — worth
+      revisiting once a 3rd genuinely different model is available
+      locally, so the judge isn't one of the two it's arbitrating between.
+- [ ] No dbt tests on `performance_history` yet (see Phase 1's dbt-tests
+      item — applies here too).
