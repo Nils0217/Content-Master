@@ -27,19 +27,65 @@ entry points still work — they just forward to the same CLI now.
 contentmaster run --whitepaper "Marketing hack white paper.pdf" --channel x --product-name "AutoMarketer.ai"
 ```
 
-First run generates cold-start drafts. After a post publishes, the loop
-doesn't just ask one model to guess an improvement from that single
-post's numbers — `analysis.py` cross-validates against this
-product/channel's real history in the warehouse (`dbt run` in
-`warehouse/` first — see below) and prints its verdict for you to confirm
-or override, then `discuss.py` has two different local models each
-propose a next-round strategy and a third synthesize them. Run it again
-with the same product+channel and check the log for
-`"improving_on_prior": true` — that synthesized strategy gets fed back
-into the prompt, so the new drafts act on what actually worked, not a
-cold start or a frozen replay. That's the compounding proof: content that
-gets better each run, not just cheaper. See `docs/WHITEPAPER.md` §2 for
-the full track → analysis → discuss → log diagram.
+First run extracts the whitepaper's *topics* (not one fixed Q&A answer,
+see `topic_index.py`; re-extracted only if the file's content actually
+changed since last time), reviews any genuinely new ones with you, then
+writes one draft per least-used topic for real variety across runs
+instead of the same reworded blob.
+
+By default this opens a review page in your browser (Streamlit, see
+`streamlit_app.py`): it shows each drafted post, generates its image if
+`CLOUDFLARE_ACCOUNT_ID`/`CLOUDFLARE_API_TOKEN` are set (see
+`image_generator.py`, skipped silently, text-only post, if not), and
+lets you Approve (publishes immediately), Edit, Send feedback (the LLM
+revises the draft from your notes instead of you typing the literal
+replacement text, see `draft_generator.revise_post()`), or Reject.
+Pass `--terminal` to review right there in the terminal instead (the
+original flow, one draft at a time, same approve/edit/feedback/reject
+choices plus an image review gate, `[a]ttach`/`[r]egenerate`/`[s]kip`,
+before an image can be attached).
+
+Once a draft publishes, `run()` stops there for it: **no metrics are
+pulled and no analysis runs immediately**, a post seconds old has
+nothing real to measure yet. It's queued (`plays/_tracking_review.jsonl`)
+for the next step instead.
+
+```bash
+contentmaster review                 # checks the 24h checkpoint (default)
+contentmaster review --checkpoint 7d # or 7d / 30d
+```
+
+Run this once real time has passed. It finds posts due for that
+checkpoint, pulls their *real* metrics for the first time, then
+`analysis.py` cross-validates against this product/channel's history *at
+that same checkpoint tier* in the warehouse (`dbt run` in `warehouse/`
+first — see below), and `discuss.py` has two different local models each
+propose a next-round strategy (a third-model judge exists but is off by
+default, see `discuss.py`'s `_JUDGE_ENABLED`).
+
+By default this then opens the same browser review page as `contentmaster
+run` (Streamlit, see `streamlit_app.py`), this time on its "Analysis
+review" tab: real metrics + the actual recommendation together, with
+Confirm / Disagree (with a note) buttons — one combined screen, not raw
+numbers confirmed before there was even a recommendation to react to (see
+`docs/LOG.md` 2026-09-16). Pass `--terminal` to confirm right there in
+the terminal instead (the original `[Y]es / [n]o` flow, one post at a
+time). Either way, if you disagree, your note is kept *alongside* the
+LLM's recommendation, not in place of it — the next `contentmaster run`
+for the same product+channel reads back the highest-maturity completed
+checkpoint available (a 7d reading over a 24h one, even from an older
+post) *and* both the recommendation and your feedback if you left any —
+check the log for `"improving_on_prior": true`. That's the compounding
+proof: content that gets better each round, based on real audience
+response, not just cheaper. See `docs/WHITEPAPER.md` §2 for the full
+diagram and docs/LOG.md 2026-09-15 for why this is split into two
+commands instead of one, and docs/LOG.md 2026-09-18 for why the human
+confirmation step also moved to the browser by default.
+
+A due post already sitting in the browser queue awaiting your decision is
+never re-pulled or re-analyzed by a second `contentmaster review`
+invocation (in either mode) — it's skipped with a note telling you where
+to go decide it, so the same post/checkpoint can't get double-captured.
 
 Every event is written to `audit/events.jsonl` (one JSON line per step).
 
@@ -90,7 +136,15 @@ scripts/
 src/contentmaster/
   cli.py                       # `contentmaster` CLI dispatcher — thin, no real logic of its own
   config.py                   # loads .env into typed settings
+  slug.py                      # one shared slugify() for filenames/dataset names — 2026-09-17,
+                               # consolidated from 3 near-duplicate versions (see docs/LOG.md)
   cognee_client.py             # layer 1
+  document.py                   # 2026-09-19 — reads a source document's plain text LOCALLY
+                               # (.rtf/.txt/.md, and .pdf if the optional `pypdf` is installed).
+                               # Shared by cognee_client's ingestion and by the draft-generation
+                               # fallback that runs when Cognee is down, so both see the same text
+  topic_index.py                # 2026-09-15: the whitepaper's topics as a reviewed, cached,
+                               # usage-tracked list — replaces one fixed Cognee Q&A per run
   platforms/                    # Platform adapter interface + implementations
     base.py                       # the Platform ABC + Post + generic exceptions
     bluesky.py                    # first implementation
@@ -98,25 +152,63 @@ src/contentmaster/
   metrics_store.py             # layer 3 — local JSONL, read by warehouse/ dbt (hotdata.dev retired)
   draft_generator.py            # layer 4 — calls local Ollama directly (renamed from
                                # rocketride_client.py 2026-09-13, see docs/LOG.md — it never
-                               # actually depended on RocketRide's cloud service)
-  human_loop.py                 # brand-safety gate (draft review)
-  analysis.py                    # track -> ANALYSIS: cross-validate vs. warehouse history, human-confirmed
+                               # actually depended on RocketRide's cloud service). One post per
+                               # topic (see topic_index.py); revise_post() powers human_loop.py's
+                               # [f]eedback option
+  human_loop.py                 # brand-safety gate (draft review) — [a]pprove / [e]dit (literal
+                               # text, confirmed before it commits) / [f]eedback (LLM revises from
+                               # your notes) / [r]eject. review_image() applies the same gate to
+                               # generated images (2026-09-16, see image_generator.py)
+  image_generator.py            # 2026-09-16 (Phase 4) — Cloudflare Workers AI / FLUX.1-schnell.
+                               # generate_image() returns None (never raises) if
+                               # CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN aren't set — text-only
+                               # publish, same as before this existed
+  tracking_review.py            # 2026-09-15: plays/_tracking_review.jsonl — publish just queues a
+                               # post here; no metrics/analysis until contentmaster review, later
+  draft_queue.py                 # 2026-09-17 (Phase 5): plays/_draft_review.jsonl — the handoff
+                               # between draft+image generation and the browser's "Draft review" tab
+  analysis_queue.py              # 2026-09-18 (Phase 5 extended to review): plays/_analysis_review.jsonl
+                               # — same handoff, for a completed analysis awaiting a human decision;
+                               # keyed on (post_id, checkpoint), not post_id alone
+  analysis.py                    # ANALYSIS: cross-validate vs. warehouse history, *scoped to one
+                               # checkpoint tier* (24h/7d/30d — see pipeline.py). confirm_with_human()
+                               # is still the terminal-mode confirmation; the browser path calls
+                               # pipeline.apply_analysis_decision() instead, see analysis_queue.py
   discuss.py                      # ANALYSIS -> DISCUSS: 2 local models propose, 1 synthesizes
-  modiqo_play.py                # layer 5 (muscle memory) — snapshot + append-only history ledger
+  modiqo_play.py                # layer 5 (muscle memory) — snapshot + append-only history ledger,
+                               # both now tagged with which checkpoint tier produced them
   audit.py                      # JSONL audit log
-  pipeline.py                   # orchestrator
-plays/                        # captured muscle-memory patterns (per product+channel)
+  pipeline.py                   # orchestrator — run() (extract -> draft -> review -> publish ->
+                               # queue) and run_review() (checkpoint -> analyze -> discuss -> log);
+                               # both default to a shared Streamlit page (launch_streamlit() dedupes
+                               # a second launch via a port check), --terminal on either command
+                               # keeps the original blocking-input() flow with no browser at all
+streamlit_app.py                 # the browser review page both commands open by default — a "Draft
+                               # review" tab (draft_queue.py) and an "Analysis review" tab
+                               # (analysis_queue.py), same process/port either way
+plays/                        # captured muscle-memory patterns: _history.jsonl (real timeline),
+                               # *.json (per product+channel current-state snapshot),
+                               # _tracking_review.jsonl (published, awaiting a checkpoint),
+                               # {product}_topics.json (the topic index), _failures.jsonl,
+                               # _draft_review.jsonl / _analysis_review.jsonl (pending browser review)
 audit/events.jsonl            # audit log
 warehouse/                    # dbt + DuckDB (+ MotherDuck) analytics — see warehouse/README.md
 docs/                          # WHITEPAPER.md, SCHEDULE.md, LOG.md, ERROR_LOG.md
 ```
 
-`src/contentmaster/hydradb_client.py` / `hotdata_client.py` /
-`rocketride_client.py` still exist on disk — dead code nothing imports
-(kept only because this dev environment's `rm` was blocked when they were
-retired; safe to delete by hand:
-`rm -f src/contentmaster/hydradb_client.py src/contentmaster/hotdata_client.py src/contentmaster/rocketride_client.py`).
-(`src/automarketer/`, the pre-rename package, has already been deleted.)
+2026-09-19 (code scan): this section used to list files to delete by
+hand. Every one of them is already gone — `rocketride_client.py`,
+`improve.py`, `.claude/rules/rocketride.md`, `.cursor/rules/
+rocketride.mdc`, `.rocketride/`, and the `test-checkpoint-product`
+snapshot, along with the earlier batch (`src/automarketer/`,
+`hydradb_client.py`, `hotdata_client.py`, the original
+`your-best-stress-reliever::*.json` test snapshots). Nothing here needs
+deleting; the instructions themselves were the stale thing.
+
+Two scripts do remain and are still referenced above:
+`scripts/configure_cognee_llm.sh` (live — how Cognee gets an LLM) and
+`scripts/start_hydradb.sh` (dead since HydraDB was removed 2026-09-13,
+kept only as a reference for a possible future graph migration).
 
 ## One-time environment setup (already done on this machine)
 

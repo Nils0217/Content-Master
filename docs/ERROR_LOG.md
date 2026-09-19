@@ -6,6 +6,53 @@ where it helps grep), cause, fix, where it lives in code/log.
 
 ---
 
+### human_loop.py's [e]dit prompt published a reviewer's *feedback* as the literal post text
+
+**Symptom:** A real, live post on the account read exactly "add some
+details" — the whole post, nothing else. No crash, no error; the
+reviewer had typed that string meaning it as an instruction ("please add
+more detail to this draft"), not as the literal replacement text.
+**Cause:** The old `[a]pprove / [e]dit / [r]eject` prompt only had one
+way to change a draft — "New text:" — and used whatever was typed
+*verbatim* as `final_text`. There was no way to give the LLM feedback and
+have it revise the draft; typing an instruction there just became the
+post.
+**Fix (2026-09-15, `大改` per the user — a real redesign, not a wording
+tweak):** split into two distinct options. `[e]dit` still takes literal
+replacement text, but now shows "About to use this as the final text: ...
+Confirm? [y]es / [n]o, go back" before it commits. New `[f]eedback`
+option: the human describes what should change, `DraftGenerator.revise_post()`
+sends it to the LLM (grounded in the draft's topic brief if it has one),
+and the *revised* draft is shown before any approval is possible. See
+`src/contentmaster/human_loop.py` (`review_draft()`, now a loop, not a
+single input/return) and `src/contentmaster/draft_generator.py`
+(`revise_post()`). Verified by replaying the exact failing input
+(`[f]eedback` -> "add some details" -> `[a]pprove`) through a mocked LLM
+call and confirming `final_text` was the revision, not the literal
+feedback string.
+
+---
+
+### topic_index.py's review prompt silently treated an unrecognized answer (e.g. "t") as "accept all"
+
+**Symptom:** Typing "t" at "Accept all as-is, or make changes? [A]ccept
+all / [c]hange some >" did nothing visible — no error, no type-in prompt,
+the topics were just silently all accepted as extracted.
+**Cause:** `if not choice.startswith("c"): return new_topics` — *any*
+input that wasn't "c..." fell through to "accept all", including "t",
+which the reviewer expected to open a type-in-a-new-topic flow, and
+including a blank/typo'd answer.
+**Fix (2026-09-15, per the user: "add a lock only a,c,t input. anything
+else shows error message"):** the prompt now loops until the input is
+exactly `"a"`, `"c"`, or `"t"` — blank no longer defaults to accept
+either; anything else prints an explicit error and re-asks. `"t"` at the
+top level now jumps straight into the type-in flow (factored into a
+shared `_prompt_new_topic()` so the top-level shortcut and the in-loop
+`"t"` option can't drift apart). See
+`src/contentmaster/topic_index.py`'s `_review_topics_interactive()`.
+
+---
+
 ### Root cause of "Security: rm blocked in workspace" (and curl/wget/ssh/nc/node/ruby too)
 
 **Symptom:** Same as the earlier `rm`-specific entry below, but now with
