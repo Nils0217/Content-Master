@@ -1,6 +1,6 @@
 -- Raw source: plays/*.json — one file per (product, channel) with the
 -- current winning post, its real pulled metrics, and the LLM's improvement
--- note (see ../src/automarketer/modiqo_play.py). DuckDB reads JSON natively,
+-- note (see ../src/contentmaster/modiqo_play.py). DuckDB reads JSON natively,
 -- no Python ETL step needed.
 select
     product,

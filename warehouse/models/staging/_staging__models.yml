@@ -1,0 +1,78 @@
+version: 2
+
+models:
+  - name: stg_success_history
+    description: "One row per successful, published post over time (from plays/_history.jsonl)."
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: product
+        tests: [not_null]
+      - name: channel
+        tests: [not_null]
+
+  - name: stg_failures
+    description: "One row per rejected/failed draft (from plays/_failures.jsonl)."
+    columns:
+      - name: product
+        tests: [not_null]
+      - name: channel
+        tests: [not_null]
+
+  - name: stg_plays
+    description: "Current-state snapshot: one row per (product, channel), the latest winning post."
+    columns:
+      - name: product
+        tests: [not_null]
+      - name: channel
+        tests: [not_null]
+      - name: winning_text
+        tests: [not_null]
+
+  - name: stg_events
+    description: "Raw pipeline audit events (from audit/events.jsonl)."
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: stage
+        tests: [not_null]
+      - name: event
+        tests: [not_null]
+
+  - name: stg_post_metrics
+    description: "Every metrics reading ever recorded (from metrics/post_metrics.jsonl), not just the latest."
+    columns:
+      - name: post_id
+        tests: [not_null]
+      - name: channel
+        tests: [not_null]
+      - name: recorded_at
+        tests: [not_null]
+
+  - name: stg_google_trends_timeline
+    description: "Google Trends 'cat' daily search interest (external cross-validation data)."
+    columns:
+      - name: day
+        tests: [not_null, unique]
+      - name: cat_interest
+        tests: [not_null]
+
+  - name: stg_google_trends_region
+    description: "Google Trends 'cat' interest by country — reference table, not joined to performance_history."
+    columns:
+      - name: country
+        tests: [not_null, unique]
+
+  - name: stg_google_trends_related_top
+    description: "Google Trends 'cat' related queries — TOP panel — reference table for the discuss prompt."
+    columns:
+      - name: query
+        tests: [not_null, unique]
+      - name: score
+        tests: [not_null]
+
+  - name: stg_google_trends_related_rising
+    description: "Google Trends 'cat' related queries — RISING panel — reference table for the discuss prompt."
+    columns:
+      - name: query
+        tests: [not_null, unique]

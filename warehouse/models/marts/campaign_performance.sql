@@ -18,11 +18,20 @@ from {{ ref('stg_plays') }}
 
 union all
 
+-- 2026-09-19 (code scan): `status` used to be the literal 'rejected' for
+-- every row of stg_failures. But that file mixes never-published drafts
+-- (checkpoint is null) with posts that DID publish and then underperformed
+-- at a checkpoint (checkpoint is not null) — see the longer note in
+-- performance_history.sql. Labelling the second kind 'rejected' misstates
+-- what happened to a real post that is live on the platform right now.
+-- Unlike performance_history, these rows are NOT dropped here: this model
+-- unions against stg_plays (a current-state snapshot of winners only), so
+-- for an underperforming post this is the only record of it.
 select
     product,
     channel,
     text as post_text,
-    'rejected'   as status,
+    case when checkpoint is null then 'rejected' else 'published' end as status,
     null as impressions,
     null as clicks,
     null as conversions,

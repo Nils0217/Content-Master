@@ -1,0 +1,35 @@
+version: 2
+
+models:
+  - name: campaign_performance
+    description: "Current-state snapshot: at most 1 published row per product/channel, plus rejections."
+    columns:
+      - name: product
+        tests: [not_null]
+      - name: channel
+        tests: [not_null]
+      - name: status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["published", "rejected"]
+
+  - name: performance_history
+    description: >
+      Real timeline of every publish/reject over time, LEFT JOINed against
+      Google Trends "cat" search interest by day. The table analysis.py
+      actually queries.
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: product
+        tests: [not_null]
+      - name: channel
+        tests: [not_null]
+      - name: status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["published", "rejected"]
