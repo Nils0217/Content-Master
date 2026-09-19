@@ -50,10 +50,13 @@ class CogneeClient:
         """
         file_path = Path(file_path)
         if file_path.suffix.lower() == ".rtf":
-            from striprtf.striprtf import rtf_to_text
+            # 2026-09-19: shares document.read_text() with the local
+            # draft-generation fallback rather than keeping a second copy
+            # of the same striprtf call — the two drifting apart would
+            # mean Cognee and the fallback saw different text.
+            from .document import read_text
 
-            text = rtf_to_text(file_path.read_text(errors="replace"))
-            return self.add_raw_texts([text], labels=labels)
+            return self.add_raw_texts([read_text(file_path)], labels=labels)
 
         with file_path.open("rb") as fh:
             files = {"data": (file_path.name, fh, "application/octet-stream")}
@@ -102,7 +105,13 @@ class CogneeClient:
         return resp.json()
 
     # -- retrieval --------------------------------------------------------
-    def search(self, query: str, search_type: str = "GRAPH_COMPLETION") -> dict[str, Any]:
+    def search(self, query: str, search_type: str = "GRAPH_COMPLETION") -> list[dict[str, Any]]:
+        """Returns a list of result envelopes, each shaped roughly
+        {"search_result": ["free text", ...], ...} — see
+        pipeline.step1_cognee_extract_topics() for the only consumer.
+        2026-09-19 (code scan): annotated `dict[str, Any]` until now,
+        which contradicted every call site.
+        """
         resp = requests.post(
             f"{self.cfg.base_url}/api/v1/search",
             headers=self._headers(),
@@ -112,33 +121,10 @@ class CogneeClient:
         resp.raise_for_status()
         return resp.json()
 
-    def remember(self, text: str, labels: str = "gtm-memory") -> dict[str, Any]:
-        """Turn one interaction (e.g. a campaign result) into a durable memory unit."""
-        resp = requests.post(
-            f"{self.cfg.base_url}/api/v1/remember",
-            headers=self._headers(),
-            files={},
-            data={"raw_data": [text], "labels": labels},
-            timeout=60,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    def recall(self, query: str) -> dict[str, Any]:
-        resp = requests.post(
-            f"{self.cfg.base_url}/api/v1/recall",
-            headers=self._headers(),
-            json={"query": query},
-            timeout=60,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    def graph_summary(self) -> dict[str, Any]:
-        resp = requests.get(
-            f"{self.cfg.base_url}/api/v1/datasets/graph-summary",
-            headers=self._headers(),
-            timeout=60,
-        )
-        resp.raise_for_status()
-        return resp.json()
+    # 2026-09-19 (code scan): remember() / recall() / graph_summary() were
+    # removed here — three wrappers around Cognee endpoints that nothing in
+    # this project has ever called. Memory in this pipeline lives in
+    # plays/ and the topic index, not in Cognee's own memory endpoints; the
+    # wrappers were aspirational, and an untested, unused HTTP wrapper is
+    # worse than none (it reads as "this path works"). Re-add from git
+    # history if a real caller ever appears.

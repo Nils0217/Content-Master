@@ -19,19 +19,36 @@ from typing import Any
 
 
 class PlatformConfigError(RuntimeError):
-    """Required credentials/config for a platform are missing."""
+    """Required credentials/config for a platform are missing.
 
-
-class PlatformAuthError(RuntimeError):
-    """Login/authentication with a platform failed."""
-
-
-class PlatformRateLimitError(RuntimeError):
-    """A platform's API rate limit was hit."""
+    Deliberately NOT a PlatformAPIError: nothing was attempted against the
+    platform at all, so callers that fall back on "the call failed" should
+    treat this separately (it means "you haven't set this up yet").
+    """
 
 
 class PlatformAPIError(RuntimeError):
-    """Any other platform API/network failure."""
+    """Any platform API/network failure.
+
+    2026-09-19 (code scan): this is now the base class for the auth and
+    rate-limit errors below, so a caller that only wants "the platform
+    call failed, degrade gracefully" can catch this one and be sure it
+    covers every runtime failure mode. Before this, all four classes
+    inherited RuntimeError independently, so `except PlatformAPIError`
+    silently missed auth/rate-limit failures — pipeline.step5_publish()
+    and _pull_checkpoint_metrics() both did exactly that, and would crash
+    the whole run on a rate limit instead of falling back. Callers that
+    DO want to tell them apart still can: list the subclasses first, the
+    way cli.py's `connect` command already does.
+    """
+
+
+class PlatformAuthError(PlatformAPIError):
+    """Login/authentication with a platform failed."""
+
+
+class PlatformRateLimitError(PlatformAPIError):
+    """A platform's API rate limit was hit."""
 
 
 @dataclass
@@ -59,6 +76,14 @@ class Platform(ABC):
 
     name: str
 
+    # 2026-09-19 (code scan): every platform has a different post length
+    # cap, and until now only bluesky.py knew its own — so nothing
+    # upstream (draft generation, the review UI) could warn before a
+    # too-long post reached publish_post() and blew up. Declared here so
+    # any caller can check `get_platform(ch).max_post_chars` generically.
+    # None means "no known cap".
+    max_post_chars: int | None = None
+
     @abstractmethod
     def test_connection(self) -> dict[str, Any]:
         """Authenticate and return non-sensitive identity info (handle,
@@ -75,12 +100,22 @@ class Platform(ABC):
         raise NotImplementedError(f"{self.name} does not support fetch_public_posts()")
 
     @abstractmethod
-    def publish_post(self, text: str) -> dict[str, Any]:
+    def publish_post(
+        self, text: str, image: bytes | None = None, image_alt: str = "",
+    ) -> dict[str, Any]:
         """Post to this account's own timeline for real. Only ever call
         this after human approval (see human_loop.review_draft) — never on
         unreviewed text. Returns a dict with at least a platform-specific
         reference (e.g. {"uri": ...} or {"id": ...}) that get_post_metrics()
         can use to look the post back up.
+
+        `image`/`image_alt` (2026-09-16, Phase 4 — see image_generator.py):
+        optional. A platform with no image support yet can just ignore
+        them (post text-only) rather than raise — image generation itself
+        already degrades gracefully when unconfigured, so a platform
+        adapter doing the same keeps that chain unbroken end to end.
+        `image_alt` should always be given when `image` is (accessibility;
+        Bluesky's own client strongly encourages it).
         """
 
     @abstractmethod

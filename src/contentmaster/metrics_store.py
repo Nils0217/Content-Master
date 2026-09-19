@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import random
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from .config import settings
@@ -53,7 +52,9 @@ def get_metrics(post_id: str) -> dict[str, Any] | None:
 def mock_metrics(post_id: str) -> dict[str, Any]:
     """Clearly-labeled stand-in for live engagement data, used when there's
     no real published post to pull metrics from (channel has no
-    implemented platform adapter, or the publish fell back to simulated).
+    implemented platform adapter, or the publish fell back to simulated) —
+    also the fallback at checkpoint time (see pipeline._pull_checkpoint_metrics)
+    when a real platform call fails (rate limit, network error, etc.).
     """
     impressions = random.randint(400, 4000)
     clicks = int(impressions * random.uniform(0.01, 0.06))

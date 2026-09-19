@@ -33,6 +33,7 @@ from .base import (
 
 class BlueskyPlatform(Platform):
     name = "bluesky"
+    max_post_chars = 300
 
     def __init__(self, cfg: BlueskySettings | None = None):
         self.cfg = cfg or settings.bluesky
@@ -110,12 +111,29 @@ class BlueskyPlatform(Platform):
             for item in response.posts
         ]
 
-    def publish_post(self, text: str) -> dict[str, Any]:
-        if len(text) > 300:
-            raise ValueError(f"Bluesky posts are capped at 300 characters, got {len(text)}")
+    def publish_post(
+        self, text: str, image: bytes | None = None, image_alt: str = "",
+    ) -> dict[str, Any]:
+        # 2026-09-19 (code scan): was a bare ValueError, which
+        # pipeline.step5_publish() does not catch — a single over-long
+        # draft crashed the entire run instead of degrading. A
+        # PlatformAPIError travels the same path as any other publish
+        # failure (printed warning + simulated publish), so the operator
+        # sees it without losing the rest of the run.
+        if len(text) > self.max_post_chars:
+            raise PlatformAPIError(
+                f"Bluesky posts are capped at {self.max_post_chars} characters, got {len(text)}. "
+                "Shorten the draft in review and approve it again."
+            )
         client = self._get_client()
         try:
-            result = client.post(text=text)
+            # send_image() (not post()) when there's an image to attach —
+            # same atproto Client, just the one-image variant. 2026-09-16,
+            # Phase 4: see image_generator.py.
+            if image:
+                result = client.send_image(text=text, image=image, image_alt=image_alt)
+            else:
+                result = client.post(text=text)
         except RateLimitExceededError as e:
             raise PlatformRateLimitError("Bluesky rate limit hit while posting. Wait and retry.") from e
         except NetworkError as e:

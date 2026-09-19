@@ -1,34 +1,105 @@
 """Orchestrates the full loop (see docs/WHITEPAPER.md §2):
 
-  Cognee -> generate drafts (local Ollama) -> [human review] -> (publish)
-    -> track metrics -> analysis (cross-validated vs. warehouse history,
-    human-confirmed) -> discuss (2 local models propose, 1 synthesizes)
-    -> log (Modiqo) -> next run's generation reads it back
+  Cognee -> generate drafts + images (local Ollama, Cloudflare Workers AI)
+    -> [human review, in a browser by default, or the terminal with
+       --terminal] -> publish -> queue for review (plays/_tracking_review.jsonl)
+    ... real time passes ...
+    -> `contentmaster review`: checkpoint (24h/7d/30d) -> pull real metrics
+    -> analysis (cross-validated vs. warehouse history, checkpoint-scoped)
+    -> discuss (2 local models propose; a 3rd-model judge exists but is
+    off by default, see discuss.py's _JUDGE_ENABLED) -> [human confirms
+    or disagrees, in a browser by default, or the terminal with
+    --terminal] -> log (Modiqo, success AND failure both feed forward
+    now) -> next run's generation reads back the highest-maturity
+    completed analysis available
+
+2026-09-17 (Phase 5 design, docs/LOG.md): review moved out of `run()`'s
+own terminal by default. Drafts (and their eagerly generated images) get
+queued (plays/_draft_review.jsonl) and shown in a browser
+(streamlit_app.py), launched automatically. `--terminal` keeps the
+original inline text-then-image flow with no browser at all, for
+whoever prefers it.
+
+2026-09-18 (Phase 5 extended to `contentmaster review`, /grill-me design
+session, docs/LOG.md): the same treatment for analysis.confirm_with_human(),
+which had the same blocking-input() problem. Each due post's metrics pull
++ analysis + recommendation runs eagerly, then either confirms right in
+the terminal (--terminal) or gets queued (plays/_analysis_review.jsonl)
+and shown in the same browser page's Analysis review tab, with
+Modiqo's capture (success/failure, decided by the real ctr threshold,
+independent of the human's confirm/disagree choice) deferred until that
+decision actually happens — see apply_analysis_decision().
+
+2026-09-15 (docs/SCHEDULE.md Phase 9, docs/LOG.md — /grill-me design
+session): publish used to be immediately followed by a metrics pull and a
+full analyze+discuss+capture cycle, seconds after the post went live —
+that's noise, not signal (a real example: impressions=1, ctr=0.0). `run()`
+now stops at publish + queuing; the analysis half moved to a separate,
+later-triggered step (`run_review()`) that only looks at a post once
+real time — one of 3 checkpoints — has actually passed.
 
 HydraDB and RocketRide were removed entirely 2026-09-13 — draft
 generation was never RocketRide's cloud service to begin with, only ever
 local Ollama calls; see docs/LOG.md.
 
 Run with: contentmaster run --whitepaper "Marketing hack white paper.pdf"
+          contentmaster run --whitepaper "..." --terminal   (no browser)
+Review:   contentmaster review
+          contentmaster review --terminal                   (no browser)
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
-from . import audit, metrics_store
-from .analysis import analyze_performance
+from . import (
+    analysis_queue,
+    audit,
+    document,
+    draft_queue,
+    image_generator,
+    metrics_store,
+    topic_index,
+    tracking_review,
+)
+from .analysis import AnalysisResult, analyze_performance, confirm_with_human
 from .cognee_client import CogneeClient
 from .config import CogneeSettings, settings
 from .discuss import synthesize_strategy
 from .draft_generator import DraftGenerator
-from .human_loop import ReviewInterrupted, review_draft
-from .modiqo_play import capture_failure, capture_success, find_play
-from .platforms.base import PlatformAPIError, PlatformConfigError
+from .human_loop import ReviewInterrupted, review_draft, review_image
+from .modiqo_play import capture_failure, capture_success, find_best_prior
+from .platforms.base import PlatformAPIError, PlatformConfigError, PlatformRateLimitError
 from .platforms.registry import PLATFORMS, get_platform
+from .slug import slugify
 
-SUCCESS_CTR_THRESHOLD = 0.02  # click-through rate above this counts as a "win" for Modiqo
+SUCCESS_CTR_THRESHOLD = 0.5  # engagement score above this counts as a "win" for Modiqo
+
+# Last-resort stand-in for `--features`, used only when generation cannot
+# be grounded in a topic index or the document text. These describe this
+# pipeline itself (they are left over from when the demo whitepaper WAS
+# this project), so they are wrong for any real product — see run().
+PLACEHOLDER_FEATURES: tuple[str, ...] = (
+    "compound memory",
+    "muscle-memory replay",
+    "human-in-the-loop safety",
+)
+
+# 2026-09-18 (docs/LOG.md — real design review after the first image post's
+# analysis): the old formula was `likes / max(likes+reposts+replies, 1)`,
+# which actively punished a post for getting *more* positive engagement —
+# a repost or reply grew the denominator without growing the numerator, so
+# the same post scored lower the more people engaged with it beyond a like.
+# Replaced with a weighted average of the three signals, bounded to the
+# same [0, max(weight)] interval regardless of how much total engagement
+# a post gets, so every post's score is comparable on the same scale.
+# Reposts and replies are worth more than a like (they spread the post
+# further / show a real conversation), hence the higher weights below.
+# Still stored under the field name "ctr" everywhere (see metrics_store.py,
+# analysis.py, the warehouse models) — kept as-is for now since the metric
+# may change again before it settles; rename everywhere together, later,
+# not piecemeal.
+ENGAGEMENT_WEIGHTS = {"like": 1.0, "repost": 3.0, "reply": 2.0}
 
 
 def _dataset_slug(product_name: str) -> str:
@@ -36,39 +107,58 @@ def _dataset_slug(product_name: str) -> str:
     products/whitepapers never cross-contaminate each other's knowledge
     graph — search() only ever sees what was ingested for *this* product.
     """
-    slug = re.sub(r"[^a-z0-9]+", "-", product_name.lower()).strip("-")
-    return slug or "contentmaster"
+    return slugify(product_name, default="contentmaster")
 
 
-def step1_cognee_extract(whitepaper_path: str, dataset_label: str, product_name: str) -> str:
-    """Cognee: ECL pipeline over the raw whitepaper. Returns the extracted
-    context text (or "" if Cognee had nothing to say) — this is what makes
-    step3's drafts actually grounded in the uploaded document instead of
-    generic boilerplate.
+def step1_cognee_extract_topics(whitepaper_path: str, product_name: str) -> list[dict[str, Any]]:
+    """Replaces the old single-fixed-query extraction (2026-09-15,
+    docs/SCHEDULE.md Phase 9 — see docs/LOG.md for the full /grill-me
+    design session behind this). That version asked Cognee the exact same
+    question every single run and handed the same blob of text to every
+    draft regardless of how many times the pipeline had already run —
+    which is *why* repeat runs kept writing near-identical posts, not a
+    flaw in the LLM call itself.
+
+    Now: `topic_index.sync_topics()` only calls Cognee (the `_extract`
+    closure below — add/cognify/search) when the whitepaper's content has
+    actually changed since last time (a cheap local file hash, no Cognee
+    involved in that check itself); otherwise it returns the cached index
+    untouched, zero Cognee calls. Returns the full topic list — step3
+    picks which ones to actually write about.
     """
-    cognee = CogneeClient(CogneeSettings(dataset=_dataset_slug(product_name)))
-    audit.log_event("cognee", "add.start", file=whitepaper_path)
-    cognee.add_document(whitepaper_path, labels=dataset_label)
-    audit.log_event("cognee", "add.done")
+    def _extract() -> str:
+        cognee = CogneeClient(CogneeSettings(dataset=_dataset_slug(product_name)))
+        audit.log_event("cognee", "add.start", file=whitepaper_path)
+        cognee.add_document(whitepaper_path, labels="whitepaper")
+        audit.log_event("cognee", "add.done")
 
-    audit.log_event("cognee", "cognify.start")
-    cognee.cognify()
-    audit.log_event("cognee", "cognify.done")
+        audit.log_event("cognee", "cognify.start")
+        cognee.cognify()
+        audit.log_event("cognee", "cognify.done")
 
-    audit.log_event("cognee", "search.start", query="product name, key features, target ICP")
-    result = cognee.search("What is the product's name, its key features, and its target ICP?")
-    audit.log_event("cognee", "search.done")
+        query = (
+            "List the distinct topics, features, benefits, or claims described in this "
+            "document. For each one, respond on its own line in exactly this format: "
+            "Topic: <short name> | Brief: <one or two sentence summary>."
+        )
+        audit.log_event("cognee", "search.start", query="topic list")
+        result = cognee.search(query)
+        audit.log_event("cognee", "search.done")
 
-    # result shape: [{"search_result": ["free text..."], ...}, ...]
-    for entry in result or []:
-        for text in entry.get("search_result", []):
-            if isinstance(text, str) and text.strip():
-                return text.strip()
-    return ""
+        # result shape: [{"search_result": ["free text..."], ...}, ...]
+        for entry in result or []:
+            for text in entry.get("search_result", []):
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+        return ""
+
+    index = topic_index.sync_topics(product_name, whitepaper_path, _extract)
+    return index.get("topics") or []
 
 
 def step3_generate_drafts(
-    product_name: str, features: list[str], channel: str, context: str = ""
+    product_name: str, features: list[str], channel: str, topics_all: list[dict[str, Any]], n: int = 1,
+    target: dict[str, Any] | None = None, context: str = "",
 ) -> list[dict[str, Any]]:
     """Generates drafts via the local LLM (see draft_generator.py). When
     Modiqo already has a play for this (product, channel) — i.e. a prior
@@ -79,47 +169,128 @@ def step3_generate_drafts(
     replay: every run calls the LLM again on purpose, trading the old
     "run #2 is free" shortcut for content that actually compounds.
 
-    `context` (Cognee's real extraction from the uploaded document, if any)
-    is what lets draft_posts() ground the copy in the actual source
-    material instead of the generic feature-name template.
+    `topics_all` (the product's full topic index, see
+    step1_cognee_extract_topics/topic_index.py) is narrowed here to the
+    `n` currently-least-used topics — real variety across runs, not a
+    hardcoded per-draft template.
+
+    `context` (2026-09-19, code scan) is the grounding text used when the
+    topic index is empty — Cognee down, or nothing extracted for this
+    product yet. This argument existed on draft_posts() all along but no
+    caller ever passed it, which made draft_generator._llm_draft_posts()
+    unreachable: a Cognee outage skipped the LLM completely and returned
+    the fixed template string for every draft, identically, every run.
+    See _extract_topics_and_generate() for where it comes from.
     """
-    play = find_play(product_name, channel)
+    play = find_best_prior(product_name, channel)
+    picked_topics = topic_index.pick_topics({"topics": topics_all}, n)
     generator = DraftGenerator()
     audit.log_event("draft_generator", "draft.start", product=product_name, channel=channel,
-                     grounded=bool(context), improving_on_prior=bool(play))
-    drafts = generator.draft_posts({"name": product_name, "features": features}, channel, context=context, prior=play)
-    audit.log_event("draft_generator", "draft.done", n=len(drafts))
+                     topics=[t["topic"] for t in picked_topics], improving_on_prior=bool(play),
+                     has_context=bool(context.strip()))
+    drafts = generator.draft_posts({"name": product_name, "features": features}, channel, n=n,
+                                    topics=picked_topics, prior=play, target=target, context=context)
+    # `sources` makes a template-only run visible in audit/events.jsonl.
+    # Without it, "draft.done n=1" looked identical whether the LLM wrote
+    # the post or the canned string did — which is exactly why the dead
+    # context fallback above went unnoticed for so long.
+    audit.log_event("draft_generator", "draft.done", n=len(drafts),
+                     sources=sorted({d.get("source", "unknown") for d in drafts}))
     return drafts
 
 
-def step4_human_review(draft: dict[str, Any]) -> Any:
-    decision = review_draft(draft)
+def step4_human_review(draft: dict[str, Any], product_name: str) -> Any:
+    """`regenerate_fn` (see human_loop.review_draft) lets the reviewer type
+    feedback instead of a literal replacement — see docs/LOG.md 2026-09-15
+    for the real broken-post bug this closes (feedback typed into the old
+    single [e]dit prompt went out published verbatim). Bound to `draft`'s
+    own `topic`/`brief` when the draft came from the topic index (see
+    draft_generator.py), so a revision stays grounded in the same fact —
+    "" for the old context/fixed-template drafts, still functional either
+    way since draft_generator.revise_post()'s `brief` is optional.
+    """
+    generator = DraftGenerator()
+
+    def regenerate_fn(current_text: str, feedback: str) -> str | None:
+        return generator.revise_post(product_name, current_text, feedback, brief=draft.get("brief", ""))
+
+    decision = review_draft(draft, regenerate_fn=regenerate_fn)
     audit.log_event("human_loop", "reviewed", draft_id=draft["id"],
                      approved=decision.approved, edited=decision.edited,
                      note=decision.reviewer_note)
     return decision
 
 
-def step5_publish(draft: dict[str, Any], final_text: str) -> dict[str, Any]:
+def step4b_generate_image(draft: dict[str, Any], final_text: str) -> tuple[bytes | None, str]:
+    """Phase 4, 2026-09-16 (see image_generator.py) — runs right after
+    text approval, before publish, so the image prompt is grounded in the
+    *final* approved text, not a draft that might still change. Silently
+    returns (None, "") if Cloudflare isn't configured or generation fails
+    — text-only publish, same as before this feature existed. If an image
+    *is* generated, it still goes through review_image() (a human looks
+    at it before it can be attached — same brand-safety principle as
+    review_draft(), see human_loop.py) before this returns.
+    """
+    prompt = draft.get("brief") or final_text
+    image_bytes = image_generator.generate_image(prompt)
+    if image_bytes is None:
+        return None, ""
+
+    def regenerate_fn(p: str) -> bytes | None:
+        return image_generator.generate_image(p)
+
+    approved = review_image(image_bytes, prompt, regenerate_fn=regenerate_fn, draft_id=draft["id"])
+    if approved is None:
+        audit.log_event("image_generator", "skipped", draft_id=draft["id"])
+        return None, ""
+    audit.log_event("image_generator", "attached", draft_id=draft["id"])
+    return approved, prompt[:200]
+
+
+def step5_publish(
+    draft: dict[str, Any], final_text: str, image: bytes | None = None, image_alt: str = "",
+) -> dict[str, Any]:
     """Posts for real on any *implemented* platform (see
     platforms/registry.py's PLATFORMS) — gated on the human approval that
     already happened in step4 (human_loop.review_draft), this project's
     "explicit per-post approval" checkpoint. A channel with no implemented
     adapter yet (see PLANNED_PLATFORMS), or one whose publish call errors,
     stays a simulated, clearly-labeled stand-in.
+
+    A publish failure never raises out of here — every platform error
+    degrades to the simulated stand-in with a printed warning. See the
+    handlers below; before 2026-09-19 an auth/rate-limit failure escaped
+    them and crashed the run.
+
+    `image`/`image_alt` (2026-09-16, Phase 4): optional, already
+    human-approved by step4b_generate_image() if present — platforms that
+    don't support images yet just ignore them (see platforms/base.py).
     """
     channel = draft["channel"]
     if channel in PLATFORMS:
         try:
             platform = get_platform(channel)
-            result = platform.publish_post(final_text)
+            result = platform.publish_post(final_text, image=image, image_alt=image_alt)
             post_ref = result.get("uri") or result.get("id")
             published = {**draft, "text": final_text, "status": "published", "post_ref": post_ref}
-            audit.log_event("publish", f"{channel}.posted", draft_id=draft["id"], ref=post_ref)
+            audit.log_event("publish", f"{channel}.posted", draft_id=draft["id"], ref=post_ref,
+                             has_image=bool(image))
             return published
         except PlatformConfigError as e:
             print(f"[warn] {channel} not configured ({e}); falling back to simulated publish.")
+        except PlatformRateLimitError as e:
+            # Listed before PlatformAPIError on purpose — it's a subclass
+            # of it since 2026-09-19 (see platforms/base.py), and unlike a
+            # generic failure this one is worth retrying rather than
+            # treating as "this post is done".
+            print(f"[warn] {channel} rate-limited ({e}); falling back to simulated publish — "
+                  f"the real post did NOT go out, re-run once the limit clears.")
         except PlatformAPIError as e:
+            # 2026-09-19 (code scan): PlatformAuthError and
+            # PlatformRateLimitError used to be siblings of this class,
+            # not subclasses, so both fell straight through this handler
+            # and crashed the whole run. Fixed in platforms/base.py; this
+            # handler now genuinely covers every runtime publish failure.
             print(f"[warn] {channel} post failed ({e}); falling back to simulated publish.")
 
     published = {**draft, "text": final_text, "status": "published (simulated)"}
@@ -127,124 +298,317 @@ def step5_publish(draft: dict[str, Any], final_text: str) -> dict[str, Any]:
     return published
 
 
-def step6_track_metrics(published: dict[str, Any], channel: str) -> dict[str, Any]:
-    """Pulls real engagement back when step5 actually posted to a real
-    platform; otherwise (a channel with no implemented adapter, or a
-    publish that fell back to simulated) records a clearly-labeled
-    simulated reading instead. Either way this writes a real row to
-    metrics/post_metrics.jsonl, which warehouse/'s dbt project reads
-    directly off disk (see warehouse/models/staging/stg_post_metrics.sql)
-    — no CLI, no account, no live DB connection needed here (hotdata.dev
-    filled this role before; retired, see docs/SCHEDULE.md Phase 0).
+def step6_queue_for_review(product_name: str, channel: str, published: dict[str, Any],
+                            edited: bool, reviewer_note: str) -> None:
+    """Replaces the old step6_track_metrics + step7_modiqo_capture pair
+    (2026-09-15, docs/SCHEDULE.md Phase 9 — see the module docstring for
+    why). No metrics pull here at all: writing this entry *is* the
+    "confirmed it really published" record. The real analysis happens
+    later, from `contentmaster review` (see run_review() below), once a
+    checkpoint's worth of real time has actually passed.
     """
-    post_id = published["id"]
+    tracking_review.queue_for_review(
+        post_id=published["id"], product=product_name, channel=channel,
+        post_ref=published.get("post_ref"), final_text=published["text"],
+        edited=edited, reviewer_note=reviewer_note,
+    )
+    audit.log_event("tracking_review", "queued", post_id=published["id"],
+                     product=product_name, channel=channel)
+
+    # 2026-09-15 (topic_index.py): usage counts only bump once a post
+    # actually publishes — a draft rejected at human review never reaches
+    # here, so its topic isn't penalized for a wording problem rather than
+    # the topic itself (see docs/LOG.md for the full reasoning).
+    topic = published.get("topic")
+    if topic:
+        topic_index.record_topic_used(product_name, topic)
+        audit.log_event("topic_index", "used", product=product_name, topic=topic)
+
+
+def _pull_checkpoint_metrics(post_id: str, channel: str, post_ref: str | None,
+                              checkpoint: str) -> dict[str, Any]:
+    """Real engagement pull for one tracked post at one checkpoint —
+    same shape/fallback logic the old (removed) step6_track_metrics used
+    right after publish, just triggered much later now. Always writes a
+    real row to metrics/post_metrics.jsonl (warehouse/'s dbt project reads
+    it directly — see warehouse/models/staging/stg_post_metrics.sql).
+    """
     reading = None
-    if published.get("post_ref") and channel in PLATFORMS:
+    if post_ref and channel in PLATFORMS:
         try:
             platform = get_platform(channel)
-            real = platform.get_post_metrics(published["post_ref"])
-            impressions = max(real["like_count"] + real["repost_count"] + real["reply_count"], 1)
+            real = platform.get_post_metrics(post_ref)
+            total = real["like_count"] + real["repost_count"] + real["reply_count"]
+            weighted = (
+                ENGAGEMENT_WEIGHTS["like"] * real["like_count"]
+                + ENGAGEMENT_WEIGHTS["repost"] * real["repost_count"]
+                + ENGAGEMENT_WEIGHTS["reply"] * real["reply_count"]
+            )
             reading = {
-                "source": f"{channel} (live)",
-                "impressions": impressions,  # not every platform exposes impressions; approximated from engagement
+                "source": f"{channel} (live, {checkpoint})",
+                "impressions": max(total, 1),  # not every platform exposes impressions; approximated from engagement
                 "clicks": real["like_count"],
                 "conversions": real["repost_count"],
-                "ctr": round(real["like_count"] / impressions, 4),
+                "ctr": round(weighted / max(total, 1), 4),  # weighted engagement score, see ENGAGEMENT_WEIGHTS above
             }
-            audit.log_event(channel, "metrics.pulled", **real)
-        except PlatformAPIError as e:
-            print(f"[warn] Could not pull {channel} metrics ({e}); falling back to simulated reading.")
+            audit.log_event(channel, "metrics.pulled", checkpoint=checkpoint, **real)
+        except (PlatformConfigError, PlatformAPIError) as e:
+            # 2026-09-19 (code scan): used to catch PlatformAPIError only,
+            # which missed both get_platform()'s PlatformConfigError and
+            # (before base.py's hierarchy fix) auth/rate-limit failures —
+            # any of them crashed `contentmaster review` outright instead
+            # of falling back to a clearly-labeled simulated reading.
+            print(f"[warn] Could not pull {channel} metrics for the {checkpoint} checkpoint "
+                  f"({e}); falling back to simulated reading.")
 
     if reading is None:
         reading = metrics_store.mock_metrics(post_id)
     metrics_store.write_metrics(post_id, channel, reading)
     metrics = metrics_store.get_metrics(post_id)
-    audit.log_event("metrics", "recorded", post_id=post_id, metrics=metrics)
+    audit.log_event("metrics", "recorded", post_id=post_id, checkpoint=checkpoint, metrics=metrics)
     return metrics
 
 
-def step7a_analyze_and_discuss(product_name: str, channel: str, metrics: dict[str, Any]) -> tuple[Any, str]:
-    """track (already done — `metrics` is step6's output) -> ANALYSIS ->
-    DISCUSS -> (log happens in step7_modiqo_capture, right after).
-
-    Replaces the old single-model "improve" step, which asked one local
-    LLM to eyeball this post's raw numbers and guess a suggestion — no
-    comparison against history, no check on whether the *previous*
-    suggestion actually correlated with anything moving. Now: analysis.py
-    cross-validates against this product/channel's real timeline in the
-    warehouse (with a human confirmation gate — see analysis.py), and
-    discuss.py has two *different* local models each propose a strategy
-    grounded in that analysis, synthesized into one final instruction —
-    real model diversity, not one model talking to itself.
+def _pull_and_analyze(entry: dict[str, Any], checkpoint: str) -> tuple[dict[str, Any], AnalysisResult, str]:
+    """2026-09-18 (Phase 5 extended to `contentmaster review`, /grill-me
+    design session, see docs/LOG.md) — the eager half of what used to be
+    one synchronous step_checkpoint_analyze(): pull real (now-matured)
+    metrics, cross-validate against history, get the multi-model
+    recommendation. Shared by both the terminal path and the streamlit
+    path (mirrors _extract_topics_and_generate() being shared by
+    `run()`'s two paths) — no human interaction and no
+    capture_success/capture_failure here, see _finalize_analysis() for
+    what happens with the result once a human has actually looked at it.
     """
-    analysis = analyze_performance(product_name, channel, metrics.get("ctr", 0.0), interactive=True)
+    product_name, channel = entry["product"], entry["channel"]
+    metrics = _pull_checkpoint_metrics(entry["post_id"], channel, entry.get("post_ref"), checkpoint)
+    analysis = analyze_performance(product_name, channel, metrics.get("ctr", 0.0), checkpoint=checkpoint)
+    next_strategy = synthesize_strategy(product_name, channel, analysis, target=topic_index.load_target(product_name))
+    return metrics, analysis, next_strategy
+
+
+def _finalize_analysis(entry: dict[str, Any], checkpoint: str, metrics: dict[str, Any],
+                        analysis: AnalysisResult, next_strategy: str) -> None:
+    """The decision-time half: shared by _run_review_terminal() (called
+    right after its own confirm_with_human() call) and
+    apply_analysis_decision() (called from Streamlit once the human
+    clicks Confirm/Disagree). Whether this counts as a Modiqo success or
+    failure is decided by the real ctr threshold alone, same as before
+    this split — the human's confirm/disagree choice only ever affects
+    `analysis.human_confirmed`/`human_note` (stored either way, see
+    analysis.confirm_with_human()'s own docstring), never which of
+    capture_success/capture_failure runs.
+    """
+    product_name, channel = entry["product"], entry["channel"]
+    final_text = entry["final_text"]
+    reviewer_note = entry.get("reviewer_note", "")
+
     audit.log_event("analysis", "recorded", product=product_name, channel=channel,
-                     trend=analysis.trend, n_prior_posts=analysis.n_prior_posts,
-                     human_confirmed=analysis.human_confirmed)
-    next_strategy = synthesize_strategy(product_name, channel, analysis)
-    return analysis, next_strategy
+                     checkpoint=checkpoint, trend=analysis.trend,
+                     n_prior_posts=analysis.n_prior_posts, human_confirmed=analysis.human_confirmed)
 
-
-def step7_modiqo_capture(product_name: str, channel: str, final_text: str,
-                          metrics: dict[str, Any], approved: bool, reviewer_note: str) -> None:
-    analysis, next_strategy = step7a_analyze_and_discuss(product_name, channel, metrics)
-    if approved and metrics.get("ctr", 0) >= SUCCESS_CTR_THRESHOLD:
+    if metrics.get("ctr", 0) >= SUCCESS_CTR_THRESHOLD:
         play = capture_success(product_name, channel, final_text, metrics, reviewer_note,
-                                improvement_note=next_strategy, analysis=analysis.as_dict())
-        # (No HydraDB write here anymore — HydraDB is retired, see
-        # docs/WHITEPAPER.md §3 / docs/SCHEDULE.md Phase 0. capture_success()
-        # above already durably persists this to plays/*.json +
-        # plays/_history.jsonl, which is what analysis.py actually reads —
-        # the old HAS_PLAY graph edge was a secondary index, not the
-        # source of truth, so nothing is lost by dropping it.)
+                                improvement_note=next_strategy, analysis=analysis.as_dict(),
+                                checkpoint=checkpoint)
         audit.log_event("modiqo", "success.captured", product=product_name, channel=channel,
-                         runs=play["runs"])
+                         checkpoint=checkpoint, runs=play["runs"])
     else:
-        reason = reviewer_note or f"ctr {metrics.get('ctr')} below threshold {SUCCESS_CTR_THRESHOLD}"
+        reason = f"ctr {metrics.get('ctr')} below threshold {SUCCESS_CTR_THRESHOLD} at {checkpoint} checkpoint"
         capture_failure(product_name, channel, final_text, reason,
-                         improvement_note=next_strategy, analysis=analysis.as_dict())
+                         improvement_note=next_strategy, analysis=analysis.as_dict(),
+                         checkpoint=checkpoint, metrics=metrics)
         audit.log_event("modiqo", "failure.captured", product=product_name, channel=channel,
-                         reason=reason)
+                         checkpoint=checkpoint, reason=reason)
+
+    tracking_review.mark_checkpoint_done(entry, checkpoint)
 
 
-def run(whitepaper_path: str, channel: str = "x", product_name: str | None = None,
-        features: list[str] | None = None) -> None:
-    audit.log_event("pipeline", "run.start", whitepaper=whitepaper_path, channel=channel)
+def _run_review_terminal(entry: dict[str, Any], checkpoint: str) -> None:
+    """The original step_checkpoint_analyze() flow, unchanged in
+    behavior: pull + analyze, block on confirm_with_human() right here in
+    the terminal, then finalize immediately.
+    """
+    metrics, analysis, next_strategy = _pull_and_analyze(entry, checkpoint)
+    analysis = confirm_with_human(analysis, next_strategy)
+    _finalize_analysis(entry, checkpoint, metrics, analysis, next_strategy)
 
-    # Steps 1: Cognee. (Falls back to caller-supplied product/features if the
-    # LLM key isn't configured yet on the Cognee container — see README.)
-    product_name = product_name or Path(whitepaper_path).stem
-    features = features or ["compound memory", "muscle-memory replay", "human-in-the-loop safety"]
-    context = ""
+
+def _run_review_streamlit(entry: dict[str, Any], checkpoint: str) -> None:
+    """2026-09-18 Phase 5 extension: pull + analyze eagerly (same as the
+    terminal path), then queue the result for streamlit_app.py's Analysis
+    review tab instead of blocking here — no confirm_with_human(), no
+    capture, no mark_checkpoint_done() until apply_analysis_decision()
+    runs once the human actually decides.
+    """
+    metrics, analysis, next_strategy = _pull_and_analyze(entry, checkpoint)
+    analysis_queue.queue_analysis(entry["post_id"], checkpoint, entry, metrics, analysis.as_dict(), next_strategy)
+    audit.log_event("analysis_queue", "queued", post_id=entry["post_id"], checkpoint=checkpoint)
+
+
+def apply_analysis_decision(queue_entry: dict[str, Any], confirmed: bool, note: str) -> None:
+    """Called from streamlit_app.py's Confirm/Disagree buttons — the
+    decision-time counterpart to _run_review_terminal()'s inline
+    confirm_with_human() call, mirroring how that page's Approve button
+    calls step5_publish() directly for drafts. Rebuilds the AnalysisResult
+    queue_analysis() serialized, applies the human's decision the same way
+    analysis.confirm_with_human() does, runs the same finalize logic the
+    terminal path runs right after its own input() call, then marks this
+    queue entry decided.
+    """
+    analysis = AnalysisResult(**queue_entry["analysis"])
+    analysis.human_confirmed = confirmed
+    analysis.human_note = note
+    entry = queue_entry["entry"]
+    checkpoint = queue_entry["checkpoint"]
+    metrics = queue_entry["metrics"]
+    next_strategy = queue_entry["recommendation"]
+    _finalize_analysis(entry, checkpoint, metrics, analysis, next_strategy)
+    analysis_queue.update_entry(
+        queue_entry["post_id"], checkpoint,
+        status="confirmed" if confirmed else "disagreed", human_note=note,
+    )
+
+
+def run_review(checkpoint: str = "24h", terminal: bool = False) -> int:
+    """`contentmaster review` — scans plays/_tracking_review.jsonl for
+    posts due at this checkpoint (past CHECKPOINT_MIN_AGE and not already
+    processed at this tier — no upper window, a late run still processes
+    them). Manually triggered for now (or from the user's own launchd/
+    cron) — real automatic in-process scheduling is still TBD, see
+    docs/SCHEDULE.md Phase 9.
+
+    `terminal` (2026-09-18, Phase 5 extension, /grill-me design session —
+    see docs/LOG.md): default False, meaning each due post's analysis is
+    queued and confirmed in a browser (see _run_review_streamlit);
+    `terminal=True` keeps the original inline confirm_with_human() flow,
+    with no browser involved at all — same flag semantics as `run()`'s
+    own `terminal` parameter.
+
+    Before processing anything, each due post is checked against
+    analysis_queue — one already pending a human decision there (from an
+    earlier browser invocation) is skipped rather than re-pulled and
+    re-analyzed, regardless of which mode *this* invocation is running
+    in; otherwise a still-undecided browser item could get silently
+    double-processed and double-captured once the human finally answers.
+    """
+    due = tracking_review.find_due(checkpoint)
+    if not due:
+        print(f"No posts due for the {checkpoint} checkpoint.")
+        return 0
+    print(f"{len(due)} post(s) due for the {checkpoint} checkpoint.")
+    n_queued = 0
+    for entry in due:
+        if analysis_queue.find_pending_for(entry["post_id"], checkpoint) is not None:
+            print(f"\n--- {entry['product']} / {entry['channel']} ({entry['post_id']}) ---")
+            print("[skip] Already pending a human decision in the browser review queue — "
+                  "open http://localhost:8501 to decide, or check plays/_analysis_review.jsonl.")
+            continue
+        print(f"\n--- {entry['product']} / {entry['channel']} ({entry['post_id']}) ---")
+        try:
+            if terminal:
+                _run_review_terminal(entry, checkpoint)
+            else:
+                _run_review_streamlit(entry, checkpoint)
+                n_queued += 1
+        except ReviewInterrupted:
+            print("\n[stopped] Review interrupted — remaining due post(s) skipped this run.")
+            break
+    if n_queued:
+        print(f"\n{n_queued} post(s)' analysis queued for review.")
+        launch_streamlit()
+    return 0
+
+
+def _extract_topics_and_generate(
+    whitepaper_path: str, channel: str, product_name: str, features: list[str], n_posts: int,
+    target_region: str | None = None, target_audience: str | None = None,
+) -> list[dict[str, Any]] | None:
+    """Shared by both the terminal path and the streamlit path (2026-09-17
+    Phase 5 design, see docs/LOG.md) — step1 and step3 are exactly the
+    same either way, only what happens to the resulting drafts differs.
+    Returns None if a ReviewInterrupted happened during topic review (the
+    caller should stop the whole run then, same as before).
+
+    `target_region`/`target_audience` (2026-09-18, see
+    topic_index.load_target/save_target): only touched when actually
+    passed this run, so `contentmaster run` with no --target-* flags keeps
+    using whatever this product's target was last set to (None if never
+    set). Testing phase only exercises `region` in practice.
+    """
+    # Tolerate a stray leading/trailing space in the path here as well as
+    # in run() — this is the function that actually reads the file, and
+    # it is the shared entry point for both the terminal and browser paths.
+    whitepaper_path = whitepaper_path.strip()
+    if target_region is not None or target_audience is not None:
+        topic_index.save_target(product_name, target_region, target_audience)
+    target = topic_index.load_target(product_name)
+
+    topics_all: list[dict[str, Any]] = []
     try:
-        context = step1_cognee_extract(whitepaper_path, dataset_label="whitepaper", product_name=product_name)
-        if not context:
-            print("[warn] Cognee returned no extracted text; continuing with supplied product info.")
+        topics_all = step1_cognee_extract_topics(whitepaper_path, product_name=product_name)
+        if not topics_all:
+            print("[warn] Cognee returned no extracted topics; continuing with supplied product info.")
+    except ReviewInterrupted:
+        print("\n[stopped] Topic review interrupted (stdin closed or Ctrl+C) — run aborted before any drafts.")
+        return None
     except Exception as e:  # noqa: BLE001 — surfaced to the operator, pipeline continues
         audit.log_event("cognee", "extract.failed", error=str(e))
         print(f"[warn] Cognee extraction failed ({e}); continuing with supplied product info.")
 
-    # Step 3: generate drafts (local LLM) — grounded in Cognee's real
-    # extraction when available, so drafts reflect the uploaded document.
-    drafts = step3_generate_drafts(product_name, features, channel, context=context)
+    # 2026-09-19 (code scan): only built when there are no topics, because
+    # a topic-grounded draft is strictly better — this is the fallback,
+    # not a second input. Read locally on purpose (document.read_text, no
+    # Cognee, no network): the entire reason it exists is to still work
+    # when Cognee is the thing that is down.
+    context = ""
+    if not topics_all:
+        context = _fallback_context(whitepaper_path, product_name, features)
+        if context:
+            print("[info] No topic index — grounding this run's drafts in the whitepaper text "
+                  "read locally instead. Start Cognee to get topic-scoped drafts back.")
 
-    # Steps 4-7: human review -> publish -> track metrics -> Modiqo, per draft
+    return step3_generate_drafts(product_name, features, channel, topics_all=topics_all, n=n_posts,
+                                  target=target, context=context)
+
+
+def _fallback_context(whitepaper_path: str, product_name: str, features: list[str]) -> str:
+    """Grounding text for a run with no topic index. The document's own
+    words come first (that is the real source material); the product name
+    and features are appended so the model still has *something* concrete
+    to write from even when the document itself cannot be read locally
+    (e.g. a PDF without the optional `pypdf` installed — see document.py).
+    """
+    parts = []
+    doc_text = document.read_text(whitepaper_path, max_chars=document.PROMPT_MAX_CHARS)
+    if doc_text:
+        parts.append(f"Source document for '{product_name}':\n{doc_text}")
+        audit.log_event("document", "read_local", file=whitepaper_path, chars=len(doc_text))
+    else:
+        audit.log_event("document", "read_local.empty", file=whitepaper_path)
+    if features:
+        parts.append(f"Known features of '{product_name}': " + "; ".join(features))
+    return "\n\n".join(parts)
+
+
+def _run_terminal(product_name: str, channel: str, drafts: list[dict[str, Any]]) -> None:
+    """The original review flow, unchanged: text review then image review
+    then publish then queue, one draft at a time, right here in the
+    terminal.
+    """
     results: list[dict[str, Any]] = []
     for i, draft in enumerate(drafts, start=1):
         print(f"\n########## Draft {i} of {len(drafts)} ##########")
         try:
-            decision = step4_human_review(draft)
+            decision = step4_human_review(draft, product_name)
             if not decision.approved:
                 capture_failure(product_name, channel, draft["text"], decision.reviewer_note or "rejected")
                 results.append({"draft": i, "status": "rejected", "text": draft["text"], "channel": channel})
                 continue
-            published = step5_publish(draft, decision.final_text)
-            metrics = step6_track_metrics(published, channel)
-            # step7 also has a human-in-the-loop gate (analysis confirmation,
-            # see analysis.py) — kept inside this same try so an interrupt
-            # there stops just as cleanly as one during draft review.
-            step7_modiqo_capture(product_name, channel, decision.final_text, metrics,
-                                  approved=True, reviewer_note=decision.reviewer_note)
+            image, image_alt = step4b_generate_image(draft, decision.final_text)
+            published = step5_publish(draft, decision.final_text, image=image, image_alt=image_alt)
+            step6_queue_for_review(product_name, channel, published,
+                                    edited=decision.edited, reviewer_note=decision.reviewer_note)
         except ReviewInterrupted:
             print(f"\n[stopped] Review interrupted at draft {i} of {len(drafts)} — "
                   f"{len(drafts) - i} remaining draft(s) skipped.")
@@ -255,22 +619,187 @@ def run(whitepaper_path: str, channel: str = "x", product_name: str | None = Non
             "text": decision.final_text,
             "channel": channel,
             "post_ref": published.get("post_ref"),
-            "metrics": metrics,
+            "source": draft.get("source", "unknown"),
         })
 
     audit.log_event("pipeline", "run.done")
     _print_run_summary(results)
 
 
+def _run_streamlit(product_name: str, channel: str, drafts: list[dict[str, Any]]) -> None:
+    """2026-09-17 Phase 5 design: image generated eagerly for every draft
+    right here (text and image ready together, since streamlit cannot
+    pause mid review to generate reactively), queued for
+    streamlit_app.py to show, then the streamlit server is launched and
+    opened automatically. No inline review here at all, unlike the
+    terminal path.
+    """
+    out_dir = settings.project_root / "generated_images"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for draft in drafts:
+        prompt = draft.get("brief") or draft["text"]
+        image_bytes = image_generator.generate_image(prompt)
+        image_path = None
+        if image_bytes:
+            image_path = str(out_dir / f"{draft['id']}.png")
+            Path(image_path).write_bytes(image_bytes)
+        audit.log_event("image_generator", "generated_for_queue", draft_id=draft["id"],
+                         has_image=bool(image_bytes))
+        draft_queue.queue_draft(
+            draft["id"], product_name, channel, draft["text"],
+            topic=draft.get("topic", ""), brief=draft.get("brief", ""), image_path=image_path,
+            source=draft.get("source", "unknown"),
+        )
+
+    audit.log_event("pipeline", "run.queued_for_streamlit", n=len(drafts))
+    # 2026-09-19 (code scan): _print_run_summary() only ever ran on the
+    # --terminal path, so the DEFAULT path ended with a bare one-liner and
+    # no indication of what was actually generated — including, crucially,
+    # whether these drafts came from the LLM or the fixed template.
+    _print_queue_summary(drafts)
+    launch_streamlit()
+
+
+def _print_queue_summary(drafts: list[dict[str, Any]]) -> None:
+    """End-of-run report for the browser path — the counterpart to
+    _print_run_summary(), which reports on drafts that were reviewed and
+    published inline. Nothing here is reviewed yet, so this reports what
+    was queued and, above all, where each draft came from.
+    """
+    print("\n" + "=" * 60)
+    print(f"{len(drafts)} DRAFT(S) QUEUED FOR REVIEW")
+    print("=" * 60)
+    for i, d in enumerate(drafts, start=1):
+        source = d.get("source", "unknown")
+        label = {
+            "topics": "generated, grounded in an extracted topic",
+            "context": "generated from the whitepaper text (no topic index)",
+            "template": "NOT generated — fixed template, see the warning above",
+        }.get(source, source)
+        print(f"\nDraft {i} [{source}] — {label}")
+        if d.get("topic"):
+            print(f"  topic: {d['topic']}")
+        print(f"  text : {d['text'][:100]}")
+    if any(d.get("source") == "template" for d in drafts):
+        print("\n[!] At least one draft is the canned template, not real generated content. "
+              "Check that Cognee (localhost:8000) and Ollama (localhost:11434) are both up.")
+    print("\nOpening the review page — approve, edit, or reject there.")
+
+
+def launch_streamlit() -> None:
+    """Starts streamlit_app.py as its own process, not headless, so it
+    opens your default browser on its own. Prints the url too as a
+    fallback in case auto open does not work for some reason.
+
+    2026-09-18 (Phase 5 extended to `contentmaster review`, /grill-me
+    design session, see docs/LOG.md): shared by both `run()` and
+    `run_review()` now, both of which can independently decide to open a
+    browser in the same session — without a check, a second call would
+    try to bind an already-used port 8501. Streamlit's own resulting
+    error used to be invisible anyway (stderr went to DEVNULL below), so
+    this also fixes a real silent-failure gap, not just the new
+    double-launch case. A plain socket probe is enough here (matches this
+    project's "just enough, not a pidfile" style elsewhere — see
+    topic_index.py's source_hash cache, the append-only queue files).
+
+    2026-09-19 (real usage bug, see docs/LOG.md): the already-running
+    branch used to only print a message and return — no tab actually
+    opened, so a second `contentmaster run`/`review` invocation (the
+    common case: server from an earlier call is still up) looked like
+    "it doesn't open automatically" even though the *first* call's
+    Streamlit-launched auto-open genuinely worked. `webbrowser.open()`
+    now runs on both branches — only whether a *new server process* gets
+    started differs.
+    """
+    import socket
+    import subprocess
+    import webbrowser
+
+    url = "http://localhost:8501"
+
+    try:
+        with socket.create_connection(("localhost", 8501), timeout=0.5):
+            print(f"Streamlit is already running — opening {url}.")
+            webbrowser.open(url)
+            return
+    except OSError:
+        pass
+
+    app_path = settings.project_root / "streamlit_app.py"
+    subprocess.Popen(
+        ["streamlit", "run", str(app_path)],
+        cwd=str(settings.project_root),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    print("Opening the review page in your browser (http://localhost:8501 if it does not open on its own).")
+
+
+def run(whitepaper_path: str, channel: str = "x", product_name: str | None = None,
+        features: list[str] | None = None, n_posts: int = 1, terminal: bool = False,
+        target_region: str | None = None, target_audience: str | None = None) -> None:
+    """`n_posts` (2026-09-16): default changed 3 -> 1 per the user, while
+    still testing — reviewing 3 drafts (each with its own text review,
+    possible image review) every run was too much at this stage. Still
+    overridable (`contentmaster run --posts N`) for when that's no longer
+    true.
+
+    `terminal` (2026-09-17, Phase 5 design, see docs/LOG.md): default is
+    False now, meaning drafts get queued and reviewed in a browser (see
+    _run_streamlit) — pass `terminal=True` for the original CLI review
+    flow instead, with no browser involved at all.
+
+    `target_region`/`target_audience` (2026-09-18, see
+    topic_index.load_target/save_target and draft_generator._target_
+    instruction): who this product's posts should be written for. Only
+    updates the stored per-product default when actually passed here;
+    omit both to keep using whatever was set last.
+    """
+    # 2026-09-19 (code scan): a real run passed `"cat.rtf "` — one stray
+    # trailing space, pasted from a file picker — and every downstream
+    # read failed on it. Cheap to tolerate, and the failure it caused
+    # (silent fall back to template drafts) was expensive to diagnose.
+    whitepaper_path = whitepaper_path.strip()
+    audit.log_event("pipeline", "run.start", whitepaper=whitepaper_path, channel=channel)
+
+    # Step 1 and step 3: same either way, see _extract_topics_and_generate.
+    product_name = product_name or Path(whitepaper_path).stem
+    if not features:
+        # 2026-09-19 (code scan): these describe THIS PIPELINE, not
+        # whatever product is being marketed — they date from when the
+        # whitepaper being processed was this project's own. Left in as a
+        # last-resort placeholder, but never silently: a real run produced
+        # "How to Use a Cat — compound memory. Built for teams who ship
+        # fast." and nothing anywhere said where "compound memory" came
+        # from. Pass --features to replace them.
+        features = list(PLACEHOLDER_FEATURES)
+        print(f"[warn] No --features given for '{product_name}' — falling back to the built-in "
+              f"placeholders {features}, which describe this pipeline, not your product. "
+              f"They are only used if generation cannot be grounded any other way.")
+    drafts = _extract_topics_and_generate(whitepaper_path, channel, product_name, features, n_posts,
+                                           target_region=target_region, target_audience=target_audience)
+    if drafts is None:
+        return
+
+    if terminal:
+        _run_terminal(product_name, channel, drafts)
+    else:
+        _run_streamlit(product_name, channel, drafts)
+
+
 def _print_run_summary(results: list[dict[str, Any]]) -> None:
     """Prints a clear end-of-run report so it's obvious the pipeline
-    finished (rather than looking hung) and where to see real feedback.
+    finished (rather than looking hung). No metrics/feedback here anymore
+    (2026-09-15) — that would mean pulling numbers seconds after publish,
+    which is noise, not signal (see module docstring). Real feedback comes
+    from `contentmaster review` once a checkpoint's worth of time passes.
     """
     print("\n" + "=" * 60)
     print(f"PIPELINE FINISHED — {len(results)} draft(s) processed")
     print("=" * 60)
+    any_published = False
     for r in results:
-        print(f"\nDraft {r['draft']}: {r['status']}")
+        print(f"\nDraft {r['draft']}: {r['status']}  [source: {r.get('source', 'unknown')}]")
         print(f"  text: {r['text'][:100]}")
         # "view live" link formatting is inherently platform-specific —
         # add a case per platform here as each one gets a real adapter.
@@ -278,9 +807,10 @@ def _print_run_summary(results: list[dict[str, Any]]) -> None:
             post_id = r["post_ref"].rsplit("/", 1)[-1]
             handle = settings.bluesky.handle or "<handle>"
             print(f"  view live: https://bsky.app/profile/{handle}/post/{post_id}")
-        if r.get("metrics"):
-            m = r["metrics"]
-            print(f"  feedback: {m.get('clicks', 0)} likes-equivalent, "
-                  f"{m.get('conversions', 0)} reposts-equivalent, ctr={m.get('ctr')} "
-                  f"(source: {m.get('source')})")
+        if r["status"].startswith("published"):
+            any_published = True
+    if any_published:
+        print("\nQueued for review — run `contentmaster review` again in 24 hours "
+              "to see the first real feedback, once the numbers have had time to "
+              "mean something (see docs/SCHEDULE.md Phase 9 for why).")
     print()

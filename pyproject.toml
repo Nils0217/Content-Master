@@ -25,6 +25,10 @@ dependencies = [
 # package above (a core dep) to *read* what dbt already built. See
 # warehouse/README.md.
 warehouse = ["dbt-duckdb"]
+# streamlit_app.py — temporary MVP for the Phase 5 review UI (2026-09-17,
+# see docs/LOG.md). Optional on purpose: it's a prototype, not the final
+# design, don't want it in every install yet.
+review-ui = ["streamlit"]
 
 [project.scripts]
 contentmaster = "contentmaster.cli:main"

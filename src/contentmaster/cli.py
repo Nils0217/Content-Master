@@ -26,8 +26,24 @@ from . import pipeline as _pipeline
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    _pipeline.run(args.whitepaper, channel=args.channel, product_name=args.product_name)
+    # 2026-09-19 (code scan): say out loud when the chosen channel has no
+    # adapter. `--channel x` used to be the DEFAULT while `x` sat in
+    # PLANNED_PLATFORMS, so the out-of-the-box run quietly produced a
+    # simulated publish and nothing said so until the summary line.
+    from .platforms.registry import PLATFORMS
+
+    if args.channel not in PLATFORMS:
+        print(f"[warn] '{args.channel}' has no implemented adapter yet — this run will go through "
+              f"the whole loop but the publish step is a labeled simulation, not a real post. "
+              f"Implemented now: {', '.join(PLATFORMS) or '(none)'}.")
+    _pipeline.run(args.whitepaper, channel=args.channel, product_name=args.product_name,
+                   features=args.features, n_posts=args.posts, terminal=args.terminal,
+                   target_region=args.target_region, target_audience=args.target_audience)
     return 0
+
+
+def _cmd_review(args: argparse.Namespace) -> int:
+    return _pipeline.run_review(checkpoint=args.checkpoint, terminal=args.terminal)
 
 
 def _cmd_platforms(args: argparse.Namespace) -> int:
@@ -129,11 +145,58 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="Run the full extract -> draft -> review -> publish -> improve loop")
     p_run.add_argument("--whitepaper", required=True, help="Path to the source document")
     p_run.add_argument(
-        "--channel", default="x",
-        help="Target platform to publish to — see `contentmaster platforms` for what's implemented (default: x)",
+        "--channel", default="bluesky",
+        help="Target platform to publish to — see `contentmaster platforms` for what's "
+             "implemented (default: bluesky, the only implemented adapter). A planned-but-"
+             "unimplemented channel still runs the whole loop, with a simulated publish step.",
     )
     p_run.add_argument("--product-name", default=None)
+    p_run.add_argument(
+        "--features", nargs="+", default=None, metavar="FEATURE",
+        help="What this product does, e.g. --features \"quiet indoors\" \"needs no walks\". Used to "
+             "ground generation when there is no topic index yet, and by the last-resort "
+             "template. Omit to use the built-in placeholder list — which is almost certainly "
+             "not about YOUR product (it describes this pipeline itself).",
+    )
+    p_run.add_argument(
+        "--posts", type=int, default=1,
+        help="How many drafts to generate/review this run (default: 1 — kept small while "
+             "still testing; each one gets its own text + possible image review)",
+    )
+    p_run.add_argument(
+        "--terminal", action="store_true",
+        help="Review drafts and images right here in the terminal instead of opening a "
+             "browser (default: opens a browser page for review, see streamlit_app.py)",
+    )
+    p_run.add_argument(
+        "--target-region", default=None,
+        help="Who this product's posts should target, e.g. 'US' (testing phase: region only "
+             "so far). Persisted as this product's default; omit to keep using whatever was "
+             "set on a previous run, see topic_index.py",
+    )
+    p_run.add_argument(
+        "--target-audience", default=None,
+        help="Free text describing the target audience, e.g. 'cat owners in the US'. Same "
+             "persistence behavior as --target-region.",
+    )
     p_run.set_defaults(func=_cmd_run)
+
+    p_review = sub.add_parser(
+        "review",
+        help="Check posts due for a checkpoint (24h/7d/30d) and run real analysis on matured metrics",
+    )
+    p_review.add_argument(
+        "--checkpoint", default="24h", choices=["24h", "7d", "30d"],
+        help="Which checkpoint tier to process (default: 24h — the only one wired up so far, "
+             "see docs/SCHEDULE.md Phase 9)",
+    )
+    p_review.add_argument(
+        "--terminal", action="store_true",
+        help="Confirm each analysis right here in the terminal instead of opening a browser "
+             "(default: opens a browser page for review, see streamlit_app.py's Analysis "
+             "review tab)",
+    )
+    p_review.set_defaults(func=_cmd_review)
 
     p_platforms = sub.add_parser("platforms", help="List implemented and planned platforms")
     p_platforms.set_defaults(func=_cmd_platforms)

@@ -6,13 +6,19 @@ audit/*.jsonl
 hydradb-data/store/
 hydradb-data/cache/
 plays/*.json
+plays/topics/*.json
 plays/_failures.jsonl
 plays/_history.jsonl
+plays/_tracking_review.jsonl
+plays/_draft_review.jsonl
+plays/_analysis_review.jsonl
 metrics/*.jsonl
 .rocketride/
 pipelines/services-catalog-reference.json
 .DS_Store
 Demo-white paper/
+Dirty_data_raw/
+generated_images/
 warehouse/local.duckdb
 warehouse/*.duckdb.wal
 warehouse/target/
