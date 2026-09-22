@@ -4,9 +4,26 @@ One entry per distinct problem, newest first. Goal: grep the exact error
 text here before re-debugging from scratch. Each entry: symptom (verbatim
 where it helps grep), cause, fix, where it lives in code/log.
 
+Each entry is tagged `**Kind:**`:
+
+- `pipeline` — something that breaks a *run*: a platform, a model, an
+  external service, or the pipeline's own logic. These are what
+  `contentmaster status`'s repeated-error list is about, and what the
+  error index (see src/contentmaster/error_index.py) is meant to surface
+  for prevention.
+- `engineering` — something that breaks *building it*: the dev
+  environment, tooling, a coding mistake. Useful to a human, useless to
+  the pipeline.
+
+One file rather than two, because the boundary is often unclear
+(`llama3.2:1b` produces unusable output — a model-choice decision, or a
+runtime failure?) and a tag can be changed later while a file move cannot.
+
 ---
 
 ### human_loop.py's [e]dit prompt published a reviewer's *feedback* as the literal post text
+
+**Kind:** `pipeline`
 
 **Symptom:** A real, live post on the account read exactly "add some
 details" — the whole post, nothing else. No crash, no error; the
@@ -35,6 +52,8 @@ feedback string.
 
 ### topic_index.py's review prompt silently treated an unrecognized answer (e.g. "t") as "accept all"
 
+**Kind:** `pipeline`
+
 **Symptom:** Typing "t" at "Accept all as-is, or make changes? [A]ccept
 all / [c]hange some >" did nothing visible — no error, no type-in prompt,
 the topics were just silently all accepted as extracted.
@@ -54,6 +73,8 @@ shared `_prompt_new_topic()` so the top-level shortcut and the in-loop
 ---
 
 ### Root cause of "Security: rm blocked in workspace" (and curl/wget/ssh/nc/node/ruby too)
+
+**Kind:** `engineering`
 
 **Symptom:** Same as the earlier `rm`-specific entry below, but now with
 the actual cause instead of just "something in this dev environment blocks
@@ -82,6 +103,8 @@ other reason.
 
 ### improve.py's suggestions were silently based on zeros, not real metrics
 
+**Kind:** `pipeline`
+
 **Symptom:** No error, no crash — `generate_improvement_note()`'s prompt
 always showed "0 likes, 0 reposts, 0 replies" regardless of the post's
 actual performance, so every suggestion it ever produced was disconnected
@@ -102,6 +125,8 @@ trusting the field names in an older call site.
 ---
 
 ### DuckDB: `select ... from read_json_auto(...)` — column referenced before it's defined / column doesn't exist
+
+**Kind:** `engineering`
 
 **Symptom 1:** `Binder Error: Column "ts" referenced that exists in the
 SELECT clause - but this column cannot be referenced before it is
@@ -134,6 +159,8 @@ row) regardless of what's actually present in the file today. See
 
 ### `rm` is blocked in this dev environment: `Security: rm blocked in workspace`
 
+**Kind:** `engineering`
+
 **Symptom:** Any `rm` (even `rm -rf` on something clearly disposable, or a
 throwaway file created in the same command) fails with exactly this
 message — no file gets deleted, no error otherwise, exit code 1.
@@ -155,6 +182,8 @@ as blocking further work.
 
 ### `pip freeze` after `pip install -e .` pollutes requirements.txt
 
+**Kind:** `engineering`
+
 **Symptom:** `requirements.txt` gains a line like
 `-e git+https://github.com/<you>/<repo>.git@<sha>#egg=automarketer` plus
 the entire dependency tree of anything else installed in the venv (e.g.
@@ -174,6 +203,8 @@ whatever happens to be installed in the venv this session.
 
 ### dbt: `Error: Invalid value for '--profiles-dir': Path 'warehouse' does not exist`
 
+**Kind:** `engineering`
+
 **Symptom:** `dbt run` fails immediately with this, even though
 `warehouse/profiles.yml` exists.
 **Cause:** `DBT_PROFILES_DIR=warehouse` was set as a relative path, then
@@ -187,6 +218,8 @@ set it from the repo root before changing directories.
 
 ### DuckDB Python: `ModuleNotFoundError: No module named 'numpy'`
 
+**Kind:** `engineering`
+
 **Symptom:** `.df()` on a `duckdb` query result raises this.
 **Cause:** `.df()` needs pandas/numpy, which this project deliberately
 doesn't depend on (kept minimal per `docs/WHITEPAPER.md`'s
@@ -198,6 +231,8 @@ actually needs DataFrame operations.
 ---
 
 ### RocketRide SDK: `RuntimeError: Pipeline is already running`
+
+**Kind:** `pipeline` · **OBSOLETE — rocketride_client.py was deleted 2026-09-19 (commit 22588c2). Kept for the reasoning, not as a live problem.**
 
 **Symptom:** `client.use(filepath=..., env=NEW_ENV)` raises this on a
 second call for the same `.pipe`.
@@ -214,6 +249,8 @@ still in use — see `docs/SCHEDULE.md` Phase 0.)
 
 ### Cognee: `LabelCountMismatchError` — "Provide one label per data item"
 
+**Kind:** `pipeline`
+
 **Symptom:** `POST /api/v1/add` with `raw_data` (multiple text items) and a
 single `labels` string returns 400.
 **Cause:** Cognee's `labels` field must have exactly one label per item in
@@ -225,6 +262,8 @@ directly, do the same.
 ---
 
 ### Cognee: 500 on `.rtf` files — "No loader found for file ... extension '.rtf'"
+
+**Kind:** `pipeline`
 
 **Symptom:** `add_document()` on any `.rtf` file 500s.
 **Cause:** Cognee's server has no document loader installed for that
@@ -242,6 +281,8 @@ special case per extension.
 
 ### Cognee: search results pulled in unrelated content from other runs
 
+**Kind:** `pipeline`
+
 **Symptom:** Drafts for one product/document reference facts from a
 completely different, previously-ingested document.
 **Cause:** Every run shared one Cognee dataset (`COGNEE_DATASET`, a fixed
@@ -257,6 +298,8 @@ across *different, unrelated* products.
 
 ### RocketRide `db_hydradb` node needs a Cloud database, not the local instance
 
+**Kind:** `pipeline` · **OBSOLETE — HydraDB was removed from pipeline.py 2026-09-19 (commit 393d58a).**
+
 **Symptom:** The `db_hydradb` node in a `.pipe` needs `api_key` +
 `database` fields; pointing it at the local self-hosted HydraDB
 (Bolt/HTTP, token-file auth) doesn't fit that schema.
@@ -271,6 +314,8 @@ resource name" pair instead of a plain connection string.
 ---
 
 ### `TypeError: log_event() got multiple values for keyword argument 'uri'`
+
+**Kind:** `engineering`
 
 **Symptom:** Crashes right after a real Bluesky post succeeds, mid-way
 through pulling metrics back.
@@ -289,6 +334,8 @@ posted nothing.
 
 ### Local LLM prepends a preamble line to generated posts
 
+**Kind:** `pipeline`
+
 **Symptom:** One of N generated drafts is literally "Here are 3 marketing
 posts based on the provided information:" instead of real content.
 **Cause:** Small local models (llama3.2:3b included) often ignore a
@@ -301,6 +348,8 @@ before picking lines for drafts.
 ---
 
 ### `llama3.2:1b` works fast but produces unusable structured output
+
+**Kind:** `pipeline`
 
 **Symptom:** Cognee's `cognify()` step retries the same call repeatedly
 with growing exponential backoff, never completing (or taking many
@@ -318,6 +367,8 @@ smaller models individually before assuming any given size will work —
 ---
 
 ### Cognee container: `LLMAPIKeyNotSetError` on `add()`/`cognify()`
+
+**Kind:** `pipeline`
 
 **Symptom:** `add_document()`/`cognify()` fail even though the container
 is healthy (`/health` returns 200).

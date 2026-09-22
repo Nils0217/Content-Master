@@ -12,6 +12,9 @@ plays/_history.jsonl
 plays/_tracking_review.jsonl
 plays/_draft_review.jsonl
 plays/_analysis_review.jsonl
+plays/_products.jsonl
+plays/_characteristics.jsonl
+plays/_test_axes.jsonl
 metrics/*.jsonl
 .rocketride/
 pipelines/services-catalog-reference.json
@@ -28,3 +31,12 @@ warehouse/.user.yml
 *.egg-info/
 build/
 dist/
+
+# Isolated data root for test runs (CONTENTMASTER_DATA_ROOT, see env.example)
+.testdata/
+
+# era 0 archive — the old test account's data, kept locally only.
+# NOTE: these files exist on this machine and nowhere else. They are the
+# only record of how a completely unmanaged account performed (see
+# docs/ERA0_SNAPSHOT.md), and git is not backing them up.
+archive/
