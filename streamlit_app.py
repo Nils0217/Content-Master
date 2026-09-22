@@ -127,6 +127,45 @@ def _nav_index(idx_key: str, n: int) -> int:
     return idx
 
 
+def _show_labels(entry: dict) -> None:
+    """What the model said this draft is, and what it is testing.
+
+    2026-09-22: these fields have been generated and stored since the
+    drafting redesign, and this page showed none of them — so the one
+    instruction that actually matters at review time ("check what it put
+    in EVIDENCE-AGAINST") could not be followed here at all, and the
+    browser is the default review surface.
+
+    EVIDENCE-AGAINST gets its own callout because a control post is
+    supposed to do worse. Approving one without realising it is a control
+    means reading its result as a verdict on the content rather than as a
+    test of the current pattern.
+    """
+    axis, arm = entry.get("test_axis"), entry.get("test_arm")
+    against = (entry.get("evidence_against") or "").strip()
+    is_control = bool(against) and against.lower() not in ("none", "n/a", "-", "nothing")
+
+    if is_control:
+        st.warning(f"**Control post — deliberately goes against the evidence.** {against}\n\n"
+                   "It is expected to underperform. That is the point: if it does not, the "
+                   "pattern we have been following has stopped being true.")
+    with st.expander("What the model says this draft is", expanded=False):
+        if entry.get("topic"):
+            st.write(f"**Topic:** {entry['topic']}")
+        if entry.get("topic_reason"):
+            st.write(f"**Why this topic:** {entry['topic_reason']}")
+        if entry.get("characteristics"):
+            st.write("**Characteristics:** " + ", ".join(entry["characteristics"]))
+        if axis:
+            st.write(f"**Testing:** {axis} = {arm or '(no side given)'}")
+        else:
+            st.caption("No test axis — this draft is not comparing anything.")
+        if entry.get("evidence_used"):
+            st.write(f"**Evidence followed:** {entry['evidence_used']}")
+        if not is_control:
+            st.caption("Evidence deliberately contradicted: none.")
+
+
 def _show_length(channel: str, text: str) -> None:
     """Live character count against the target platform's own cap.
 
@@ -185,6 +224,7 @@ with tab_drafts:
 
         st.write(st.session_state[text_key])
         _show_length(entry["channel"], st.session_state[text_key])
+        _show_labels(entry)
 
         if entry.get("image_path") and Path(entry["image_path"]).exists():
             st.image(entry["image_path"], caption="Generated image")

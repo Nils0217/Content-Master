@@ -76,6 +76,7 @@ from .platforms.base import (
     PostNotFoundError,
 )
 from .platforms.registry import PLATFORMS, get_platform
+from . import product_assets
 from .product_registry import describe as describe_product, remember as remember_product
 from .publish_failure import PublishFailure, classify as classify_failure
 from .publish_guard import DraftNotPublishable, publish_blockers
@@ -152,7 +153,31 @@ def step1_cognee_extract_topics(whitepaper_path: str, product_name: str) -> list
                     return text.strip()
         return ""
 
-    index = topic_index.sync_topics(product_name, whitepaper_path, _extract)
+    def _extract_category() -> str:
+        """A second, separate Cognee query. Kept apart from the topic
+        query because that one's answer is parsed line by line as
+        `Topic: ... | Brief: ...`, and folding a different question into
+        it would put a non-conforming line into that parser.
+        """
+        cognee = CogneeClient(CogneeSettings(dataset=_dataset_slug(product_name)))
+        query = (
+            "In five words or fewer, what kind of real-world thing is this document about? "
+            "Answer with a concrete noun phrase naming the object or subject, the way you "
+            "would describe it to someone drawing a picture of it — for example "
+            "'a domestic cat', 'an automatic pet feeder', 'a folding fabric playpen'. "
+            "No brand names, no adjectives about quality, no explanation."
+        )
+        audit.log_event("cognee", "search.start", query="product category")
+        result = cognee.search(query)
+        audit.log_event("cognee", "search.done")
+        for entry in result or []:
+            for text in entry.get("search_result", []):
+                if isinstance(text, str) and text.strip():
+                    return text.strip().strip('."').strip()
+        return ""
+
+    index = topic_index.sync_topics(product_name, whitepaper_path, _extract,
+                                     extract_category_fn=_extract_category)
     return index.get("topics") or []
 
 
@@ -233,7 +258,8 @@ def step4_human_review(draft: dict[str, Any], product_name: str) -> Any:
     return decision
 
 
-def step4b_generate_image(draft: dict[str, Any], final_text: str) -> tuple[bytes | None, str]:
+def step4b_generate_image(draft: dict[str, Any], final_text: str,
+                           product_name: str = "") -> tuple[bytes | None, str]:
     """Phase 4, 2026-09-16 (see image_generator.py) — runs right after
     text approval, before publish, so the image prompt is grounded in the
     *final* approved text, not a draft that might still change. Silently
@@ -243,8 +269,26 @@ def step4b_generate_image(draft: dict[str, Any], final_text: str) -> tuple[bytes
     at it before it can be attached — same brand-safety principle as
     review_draft(), see human_loop.py) before this returns.
     """
-    prompt = draft.get("brief") or final_text
-    image_bytes = image_generator.generate_image(prompt)
+    # 2026-09-22: was `draft.get("brief") or final_text` — the whitepaper's
+    # own sentence, sent to FLUX verbatim. A brief is a list of concepts
+    # with nothing visual in it, and a diffusion model handed a sentence
+    # and no scene renders the sentence: one real image came back as a
+    # slide of garbled pseudo-text beside a cat photo. build_image_prompt
+    # turns the post into a described photograph and appends an explicit
+    # no-text constraint.
+    # A real image of the real product beats a generated approximation, so
+    # the user's own files win when there are any (product_assets.py).
+    supplied = product_assets.next_image(product_name) if product_name else None
+    if supplied is not None:
+        image_bytes, source_path = supplied
+        prompt = f"supplied by the user: {source_path.name}"
+        audit.log_event("image", "supplied", draft_id=draft["id"], file=source_path.name)
+        print(f"[image] Using your own file {source_path.name} instead of generating one.")
+    else:
+        prompt = image_generator.build_image_prompt(
+            final_text, subject_hint=draft.get("brief", ""), product=product_name,
+            category=topic_index.load_category(product_name) if product_name else "")
+        image_bytes = image_generator.generate_image(prompt)
     if image_bytes is None:
         return None, ""
 
@@ -255,8 +299,11 @@ def step4b_generate_image(draft: dict[str, Any], final_text: str) -> tuple[bytes
     if approved is None:
         audit.log_event("image_generator", "skipped", draft_id=draft["id"])
         return None, ""
-    audit.log_event("image_generator", "attached", draft_id=draft["id"])
-    return approved, prompt[:200]
+    audit.log_event("image_generator", "attached", draft_id=draft["id"], prompt=prompt[:200])
+    # Alt text describes the PICTURE, not the post — it used to be the
+    # brief truncated to 200 characters, which told a screen-reader user
+    # what the post argued rather than what the image shows.
+    return approved, image_generator.alt_text_for(prompt)
 
 
 def step5_publish(
@@ -840,7 +887,7 @@ def _run_terminal(product_name: str, channel: str, drafts: list[dict[str, Any]])
                 capture_failure(product_name, channel, draft["text"], decision.reviewer_note or "rejected")
                 results.append({"draft": i, "status": "rejected", "text": draft["text"], "channel": channel})
                 continue
-            image, image_alt = step4b_generate_image(draft, decision.final_text)
+            image, image_alt = step4b_generate_image(draft, decision.final_text, product_name)
             published = step5_publish(draft, decision.final_text, image=image, image_alt=image_alt)
             step6_queue_for_review(product_name, channel, published,
                                     edited=decision.edited, reviewer_note=decision.reviewer_note)
@@ -883,8 +930,22 @@ def _run_streamlit(product_name: str, channel: str, drafts: list[dict[str, Any]]
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for draft in drafts:
-        prompt = draft.get("brief") or draft["text"]
-        image_bytes = image_generator.generate_image(prompt)
+        # 2026-09-22: was `draft.get("brief") or draft["text"]` — the raw
+        # whitepaper sentence, straight to FLUX. This is the DEFAULT path,
+        # so it is the one that actually produced the garbled-text slide;
+        # step4b_generate_image (terminal only) had already been fixed and
+        # this had not. Third time a fix landed on one review surface and
+        # not the other.
+        supplied = product_assets.next_image(product_name)
+        if supplied is not None:
+            image_bytes, source_path = supplied
+            audit.log_event("image", "supplied", draft_id=draft["id"], file=source_path.name)
+            print(f"[image] Using your own file {source_path.name} instead of generating one.")
+        else:
+            prompt = image_generator.build_image_prompt(
+                draft["text"], subject_hint=draft.get("brief", ""), product=product_name,
+                category=topic_index.load_category(product_name))
+            image_bytes = image_generator.generate_image(prompt)
         image_path = None
         if image_bytes:
             image_path = str(out_dir / f"{draft['id']}.png")

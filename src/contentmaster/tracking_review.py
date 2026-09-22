@@ -211,6 +211,14 @@ def find_due(checkpoint: str) -> list[dict[str, Any]]:
             continue
         if is_deleted(record):
             continue
+        if not record.get("post_ref"):
+            # queue_for_review() now refuses these at the write point, but
+            # rows written before that gate existed are still here — e.g.
+            # a post that failed to publish back when a failure was
+            # degraded into a simulated publish. Without this they come due
+            # forever: every run would raise MetricsUnavailable, never
+            # mark the checkpoint done, and try again next time.
+            continue
         try:
             published_ts = datetime.fromisoformat(record["ts"])
         except (KeyError, ValueError):

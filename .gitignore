@@ -40,3 +40,8 @@ dist/
 # only record of how a completely unmanaged account performed (see
 # docs/ERA0_SNAPSHOT.md), and git is not backing them up.
 archive/
+
+# Product images the user supplies for generation to use instead of
+# inventing one (see src/contentmaster/product_assets.py). Local like the
+# whitepapers they sit beside — inputs, not code.
+product_assets/

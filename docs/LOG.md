@@ -1753,3 +1753,65 @@ auto-open ever silently fails and nobody visits the page at all, this
 particular safeguard never engages — accepted as a narrower, separately
 already-visible failure (the printed fallback URL) rather than the
 "opened once, then forgotten" case this feature targets.
+
+## 2026-09-20/22 — The pipeline stops inventing data, and starts producing posts that differ
+
+Two separate problems, found by asking why 12 real posts had taught the
+project nothing. The data was untrustworthy; separately, it carried no
+information. Fixing either alone would have left the other.
+
+**Nothing invents a number any more.** `metrics_store.mock_metrics()` is
+deleted. It returned plausible random engagement whenever a real reading
+could not be taken, in exactly the shape of a real one, and every
+fabricated-data incident traced back to it — a hand-deleted post was given
+random likes, and a post that never published would have been too. A
+failed pull now writes nothing and leaves the checkpoint due; the tracking
+ledger refuses a post with no platform reference, at the write point
+rather than by filtering at read time.
+
+**The score can tell 1 like from 5.** It was a weighted *average*, so a
+likes-only post scored exactly 1.0 however many likes it had. Now a
+weighted sum plus two gates (`scoring.py`), and five states instead of a
+success/failure binary. Tested against era 0's real distribution: 12 posts
+at zero plus one like returns `hypothesis`, where the old absolute
+threshold called 5 of 12 a success.
+
+**Known limits are enforced, not discovered by failing.** A 322-character
+draft was approved in the browser, rejected by Bluesky, silently degraded
+into a "simulated publish", recorded as published, and queued to be
+measured — the page said `Published.` and it was found two days later. The
+limit had been declared in the adapter the whole time while four separate
+prompts hardcoded "under 280 characters". Platform rules now live in one
+place (`PlatformConstraints`) that generation, review and publishing all
+read, and publish failures are classified rather than smoothed over.
+
+**Posts can differ from each other.** All 12 were declarative cat-health
+statements with zero questions, zero hooks, zero reposts, zero replies —
+not chance. Topic selection happened before the model saw anything and was
+imposed as an absolute grounding rule, while the improvement note was
+appended hedged with "where it makes sense"; the absolute instruction won
+every time, so prior evidence could never change what a post was *about*.
+The model now chooses its topic and says why, claims must trace to the
+whitepaper while framing is free, and a fixed share of every test group
+must deliberately contradict the current best evidence — because wording
+cannot stop an LLM treating a statistic as an order.
+
+**Images.** A generated image came back as a slide of garbled pseudo-text
+beside a cat photo. The prompt was the whitepaper's own sentence passed
+through verbatim: a list of concepts with nothing visual in it, and a
+diffusion model handed a sentence and no scene renders the sentence. Two
+wrong fixes preceded the right one — a hardcoded "no words, no letters"
+suffix (FLUX on Workers AI has no negative prompt, so every one of those
+words went into the *positive* prompt), and an instruction that demanded
+"the light" and "the mood", which produced the same warm window light in
+every image. The model now writes the whole prompt, Python adds nothing,
+and a check rejects prompts that name things which carry writing.
+
+Three fixes in this session landed on the terminal review path and not the
+Streamlit one, which is the default: the publish guard, the image prompt,
+and image attachment. Worth suspecting first whenever something behaves
+differently in the browser.
+
+See `docs/SCHEDULE.md` Phase 10 for what is built and what is still open,
+and Phase 11 for what was deliberately scheduled rather than built.
+

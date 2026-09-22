@@ -179,6 +179,7 @@ def _review_topics_interactive(new_topics: list[dict[str, str]]) -> list[dict[st
 
 def sync_topics(
     product_name: str, whitepaper_path: str | Path, extract_fn: Callable[[], str],
+    extract_category_fn: Callable[[], str] | None = None,
 ) -> dict[str, Any]:
     """The main entry point. Returns the up-to-date index for this
     product. Calls `extract_fn()` (real Cognee work — add/cognify/search)
@@ -223,9 +224,75 @@ def sync_topics(
     approved_new = _review_topics_interactive(genuinely_new) if genuinely_new else []
     merged = existing_topics + [{**t, "used_count": 0} for t in approved_new]
 
-    new_index = {"product": product_name, "source_hash": current_hash, "topics": merged}
+    # Category: asked for only when we do not already have one, so a
+    # whitepaper edit does not make the human re-confirm something that
+    # has not changed.
+    category = (index or {}).get("category", "")
+    if not category and extract_category_fn is not None:
+        try:
+            category = _review_category_interactive(extract_category_fn())
+        except ReviewInterrupted:
+            raise
+        except Exception as e:  # noqa: BLE001 — optional, never worth failing a run over
+            print(f"[warn] Could not extract a product category ({e}); continuing without one.")
+            category = ""
+
+    new_index = {"product": product_name, "source_hash": current_hash,
+                 "category": category, "topics": merged}
     save_index(product_name, new_index)
     return new_index
+
+
+def load_category(product_name: str) -> str:
+    """What kind of real-world thing this product is — "a soft-sided cat
+    playpen", "an automatic pet feeder".
+
+    2026-09-22. Image generation needs this because the product NAME is
+    meaningless to an image model: given "Fluffy roommate", FLUX invented
+    a glowing fur-ball and, another time, a pillow. A category is the
+    bridge from an invented name to an object that actually exists and
+    can therefore be drawn.
+
+    Empty string when none has been confirmed yet — callers fall back to
+    the product name, same as before this existed.
+    """
+    index = load_index(product_name)
+    return (index or {}).get("category", "") if index else ""
+
+
+def _review_category_interactive(proposed: str) -> str:
+    """One human decision, once per whitepaper. Confirmed rather than
+    taken on trust because this string ends up in every image prompt for
+    this product — a wrong category is wrong in every picture, which is
+    the same reason new topics and new draft labels are confirmed too.
+    """
+    print("\n" + "=" * 60)
+    print("PRODUCT CATEGORY extracted from the whitepaper")
+    print("-" * 60)
+    print(f"  {proposed or '(nothing extracted)'}")
+    print("-" * 60)
+    print("This describes what the product IS, in words an image generator can draw.")
+    print("It is not the product name and not a slogan.")
+    print("=" * 60)
+    while True:
+        try:
+            choice = input("[a]ccept / [e]dit / [s]kip (no category) > ").strip().lower()
+        except (EOFError, KeyboardInterrupt) as e:
+            raise ReviewInterrupted("Category review interrupted") from e
+        if choice == "a":
+            return proposed.strip()
+        if choice == "s":
+            return ""
+        if choice == "e":
+            try:
+                typed = input("Category (e.g. 'a soft-sided cat playpen'): ").strip()
+            except (EOFError, KeyboardInterrupt) as e:
+                raise ReviewInterrupted("Category review interrupted") from e
+            if typed:
+                return typed
+            print("Empty — nothing changed.")
+            continue
+        print(f"{choice!r} isn't a valid choice — enter a, e or s.")
 
 
 def pick_topics(index: dict[str, Any] | None, n: int) -> list[dict[str, Any]]:

@@ -106,9 +106,12 @@ def unconfirmed(proposed_characteristics: list[str], proposed_axes: list[str]) -
     has to look at before they become part of the vocabulary.
     """
     chars, axes = _load(CHARACTERISTICS_PATH), _load(TEST_AXES_PATH)
+    # Deduplicated: two drafts in one batch sharing an axis is the normal,
+    # desirable case (that is what makes it a comparison), and reporting
+    # it twice as "new" reads like two separate problems.
     return {
-        "characteristics": [c for c in proposed_characteristics if c not in chars],
-        "axes": [a for a in proposed_axes if a not in axes],
+        "characteristics": sorted({c for c in proposed_characteristics if c not in chars}),
+        "axes": sorted({a for a in proposed_axes if a not in axes}),
     }
 
 
@@ -186,3 +189,53 @@ def controls_needed(product: str, channel: str, batch_size: int) -> int:
     carried = recent[-max(0, group_size - batch_size):] if group_size > batch_size else []
     have = sum(1 for r in carried if is_control(r))
     return max(0, min(batch_size, required - have))
+
+
+def record_from_drafts(drafts: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Fold a batch's labels into the registries, and report which of them
+    the vocabulary had never seen.
+
+    Without this the registries are write-never: describe_for_prompt()
+    would say "nothing has been recorded yet" on every single run, the
+    model would never be shown what it has already used, and it would coin
+    a fresh synonym each time — "playful tone", then "casual register",
+    then "informal voice" for one idea. That is the whole failure this
+    module exists to prevent, and it is only prevented if something
+    actually writes.
+
+    Returns the newly-seen names so the caller can put them in front of a
+    human. Deliberately records first and asks after: a label the model
+    used is a fact about what it did, whether or not a human likes the
+    wording, and losing it would leave that draft unclassifiable.
+    """
+    new = unconfirmed(
+        [c for d in drafts for c in (d.get("characteristics") or [])],
+        [d["test_axis"] for d in drafts if d.get("test_axis")],
+    )
+    for draft in drafts:
+        for characteristic in draft.get("characteristics") or []:
+            record_characteristic(characteristic)
+        if draft.get("test_axis"):
+            record_axis(draft["test_axis"], draft.get("test_arm", ""))
+    return new
+
+
+def confirm_new_labels(new: dict[str, list[str]]) -> None:
+    """Show a human anything the vocabulary has not seen before.
+
+    Not a blocking prompt. A new label is not a risk the way a new product
+    name is — it does not split a history, it just adds a word — so this
+    reports rather than interrogates, and the human acts on it by editing
+    the registry files if a synonym slipped through. The point is that a
+    growing vocabulary is visible rather than silent.
+    """
+    if not any(new.values()):
+        return
+    print("\n[new vocabulary] The model used labels that have not appeared before:")
+    for characteristic in new.get("characteristics") or []:
+        print(f"  characteristic: {characteristic}")
+    for axis in new.get("axes") or []:
+        print(f"  test axis:      {axis}")
+    print("  If any of these mean the same thing as an existing label, edit "
+          "plays/_characteristics.jsonl or plays/_test_axes.jsonl so they do not "
+          "split into two.\n")

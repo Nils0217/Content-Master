@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .config import settings
-from .scoring import engagement_score
 
 METRICS_PATH = settings.data_root / "metrics" / "post_metrics.jsonl"
 

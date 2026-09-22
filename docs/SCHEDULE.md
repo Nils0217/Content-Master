@@ -670,7 +670,9 @@ finished ones (keeps this file useful as a record of intent vs. reality).
 
 ## Phase 10 — success judgement redesign (gates + percentile + eras)
 
-Design session 2026-09-19, **no code written yet**. Replaces the whole
+**Built 2026-09-20/22** — see the checklist below for what is done and what
+is not; `src/contentmaster/scoring.py` holds the score, the gates and every
+tunable constant. Designed 2026-09-19. Replaces the whole
 "is this post a win?" mechanism. Trigger: the absolute threshold
 `SUCCESS_CTR_THRESHOLD = 0.5` (`pipeline.py:76`) was passing 5 of 12 real
 posts (42%) on an account that has never once been reposted, replied to,
@@ -814,20 +816,20 @@ would otherwise corrupt era 1's data at the source:
 
 - [ ] Filter bot and self engagement out of all counts (judgement
       criteria still to be decided)
-- [ ] Read `bookmark_count` and `quote_count` in
+- [x] Read `bookmark_count` and `quote_count` in
       `platforms/bluesky.py`'s `get_post_metrics()`. **Already available
       in the installed SDK** (atproto 0.0.72 — `PostView.bookmark_count`
       at `models/app/bsky/feed/defs.py:29`, `quote_count` at `:45`, both
       `Optional[int]`), so no new endpoint is needed; the existing
       `get_posts()` call already returns them. Still unverified: whether
       they come back as real integers or `None` for this account.
-- [ ] Score becomes the weighted sum above, replacing `pipeline.py:352`'s
+- [x] Score becomes the weighted sum above, replacing `pipeline.py:352`'s
       weighted average
-- [ ] Gate 1 / gate 2 and the state set above
-- [ ] `below_baseline` stops overwriting `winning_text`
+- [x] Gate 1 / gate 2 and the state set above
+- [x] `below_baseline` stops overwriting `winning_text`
       (`modiqo_play.py:107`)
 - [ ] `account_era` + account-state snapshot on every metrics row
-- [ ] Raw counts always stored; constants centralised and re-runnable
+- [x] Raw counts always stored; constants centralised and re-runnable
 - [ ] Product identity moves to the whitepaper's content hash.
       `topic_index.py` already computes and stores one (`source_hash`,
       `topic_index.py:226`, sha256 of the file's bytes at `:48`) — it is
@@ -877,6 +879,29 @@ missing-column-in-old-rows problem (`ts`, then `checkpoint`); `era` is the
 third, so use an explicit `read_json` schema from the start rather than
 waiting for it to bite again.
 
+### Built since the design session (2026-09-20/22)
+
+- `scoring.py` — the weighted sum, gate 1, gate 2, the five states, and
+  `control_arm_size()`. Every constant lives here so stored history can be
+  re-run against new ones. `SUCCESS_CTR_THRESHOLD` is deleted.
+- `bookmark_count`/`quote_count` **verified live** on this account: Workers
+  AI's `getPosts` returns real integers, not `None`. Quote posts are
+  captured and deliberately never scored.
+- The `winning_text` overwrite is fixed structurally, not by a guard —
+  only a win reaches `capture_success()`, so `below_baseline` cannot
+  reach it at all.
+- Field names follow the arithmetic: `ctr` -> `engagement_score`, and
+  `impressions`/`clicks`/`conversions` are gone (they were ad-tech names
+  holding social numbers, and stored the same figure twice once raw counts
+  landed).
+- `metrics_store.mock_metrics()` is **deleted**. Nothing invents a number
+  any more: a failed pull writes nothing and leaves the checkpoint due, and
+  the tracking ledger refuses a post with no platform reference.
+
+Still open from the blocking list: bot/self filtering (needs the actor
+list, not just the counts), `account_era`, and product identity moving to
+the whitepaper hash. The manual profile work is unchanged.
+
 ### Still to decide (Phase 10)
 
 - [ ] Bot/self engagement judgement criteria
@@ -889,6 +914,35 @@ waiting for it to bite again.
 - [ ] Whether `quote_count` ever scores (currently: captured, not scored)
 - [ ] Final confirmation of gate 1's 8 / 10 — deliberately left provisional
       until era 1 produces real data to calibrate against
+
+## Phase 11 — scheduled, not built
+
+Decided 2026-09-22 (/grill-me), deliberately left for later.
+
+- [ ] **Generate-image toggle in the review UI.** On: the pipeline
+      generates an image with FLUX. Off: it uses whatever the user put in
+      `product_assets/<product>/` and never calls the image model. Today
+      the rule is automatic — supplied files win when they exist,
+      generation happens when the folder is empty (product_assets.py) —
+      which covers the common case but gives no way to say "I have assets
+      but I want a generated one this time", or the reverse.
+- [ ] **Full error index: retrieval, not just counting.** `error_index.py`
+      currently answers "which errors keep happening" so they can be
+      prevented. The scheduled half is feeding a past error's recorded
+      analysis back to the LLM as context so it can propose a fix, which
+      then goes through normal human review. **Required for era 1.**
+- [ ] **Platform-level learned rules.** Findings verified about a platform
+      rather than a product ("posts with links reach fewer people here")
+      currently hang on the product, so every product rediscovers them.
+      Deliberate: a product-level fact misfiled as a platform fact would
+      poison every other product, and with one product the duplication
+      costs nothing yet.
+- [ ] **Error index for humans.** The counter is built for the pipeline;
+      a view aimed at whoever is debugging is a separate shape.
+- [ ] **Automatic Google Trends refresh.** The seeds are hand-exported CSV
+      (`warehouse/seeds/`), currently ending 2026-09-13. Generation states
+      the capture date in the prompt so the model can judge staleness for
+      itself, which is honest but not a substitute for fresh data.
 
 ## Notes — considered, not accepted (revisit only with new info)
 

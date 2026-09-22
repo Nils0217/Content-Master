@@ -53,7 +53,22 @@ for the next step instead.
 ```bash
 contentmaster review                 # checks the 24h checkpoint (default)
 contentmaster review --checkpoint 7d # or 7d / 30d
+contentmaster refresh                # re-read engagement for every live post under 30 days
+contentmaster status                 # what needs a human right now
 ```
+
+`refresh` (2026-09-21) re-reads engagement and nothing else — no analysis,
+no model calls, no human decision — so it is safe to run as often as you
+like. It exists because metrics used to be read exactly once, at the 24h
+checkpoint, and then frozen forever: on a low-reach account likes arrive
+days later, and the ledger recorded 1 like across 12 posts where the
+account actually had 6. Posts found deleted are recorded as deleted and
+never polled again.
+
+`status` lists failed publishes, drafts and analyses waiting for you, and
+which errors keep repeating. Every other command prints a one-line version
+of the same summary at startup, and stays silent when there is nothing
+pending.
 
 Run this once real time has passed. It finds posts due for that
 checkpoint, pulls their *real* metrics for the first time, then
@@ -88,6 +103,25 @@ invocation (in either mode) — it's skipped with a note telling you where
 to go decide it, so the same post/checkpoint can't get double-captured.
 
 Every event is written to `audit/events.jsonl` (one JSON line per step).
+
+## Modules added 2026-09-20/22
+
+| module | what it is for |
+|---|---|
+| `scoring.py` | the engagement score, the win/lose gates, and every tunable constant in one place |
+| `publish_guard.py` | last check before anything reaches a real account — refuses text that is not a post, and enforces the platform's own limits |
+| `publish_failure.py` | sorts a failed publish into content / environment / technical, because those need opposite responses |
+| `product_registry.py` | says how often a product name has been used, and warns loudly when one has never been seen |
+| `draft_labels.py` | what each draft IS and what it is TESTING, with a vocabulary that grows instead of fragmenting |
+| `product_assets.py` | your own product images, preferred over generated ones |
+| `error_index.py` | which errors keep happening — derived from the audit log, so they get prevented rather than handled |
+| `pending.py` | what needs a human, surfaced in three places with different lifetimes |
+
+`CONTENTMASTER_DATA_ROOT` redirects everything the pipeline writes
+(`plays/`, `metrics/`, `audit/`, `generated_images/`) somewhere else, so a
+test run cannot touch the real ledger. Inputs are still read from the
+project root, and dbt always reads the real root, so test rows can never
+reach a mart. Every command prints a banner while it is set.
 
 ## Platforms
 
@@ -125,6 +159,9 @@ publish.
 
 ```
 .env                         # all credentials/config (gitignored)
+product_assets/<product>/     # your own product images (gitignored). When this folder
+                               # has images, they are used instead of generating one —
+                               # a real photo beats an approximation. Least-used first.
 pyproject.toml                # packaging + the `contentmaster` CLI entry point
 requirements.txt
 run_pipeline.py               # deprecated — forwards to `contentmaster run`

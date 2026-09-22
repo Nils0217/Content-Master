@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from . import analysis_queue, draft_queue, tracking_review
+from . import draft_queue, tracking_review
 from .config import settings
 
 

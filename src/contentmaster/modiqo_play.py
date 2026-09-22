@@ -285,10 +285,11 @@ def capture_failure(
 
     `checkpoint` is None for a draft rejected at human review (never
     published, so no checkpoint tier applies) and set to "24h"/"7d"/"30d"
-    when a *published* post's checkpoint reading came in under
-    SUCCESS_CTR_THRESHOLD (see pipeline.py's _finalize_analysis) —
-    same success/failure split pipeline.py already used right after
-    publish, just relocated to checkpoint time.
+    when a *published* post's checkpoint verdict was anything other than a
+    win — `hypothesis`, `likes_only` or `below_baseline` (scoring.judge,
+    called from pipeline._finalize_analysis). It used to be "came in under
+    SUCCESS_CTR_THRESHOLD", a single absolute number; that threshold no
+    longer exists.
 
     2026-09-18: a checkpoint failure (real `checkpoint` set) now also
     appends to plays/_history.jsonl, tagged outcome="failure" — see

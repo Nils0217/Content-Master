@@ -20,6 +20,7 @@ from typing import Any
 
 import requests
 
+from . import audit
 from .config import settings
 
 from .scoring import score_of as _score_of
@@ -124,10 +125,24 @@ def _split_labels(value: str) -> list[str]:
     return [p.strip().lower() for p in re.split(r"[,;]", value or "") if p.strip()]
 
 
+# A 3B model asked for `axis = side` sometimes returns the placeholders
+# themselves: "axis = tone, side: negative". Splitting on the first "="
+# then yields axis="axis", which is meaningless. Recognised and unwrapped
+# rather than rejected — the model did say what it was varying, just
+# around the template instead of inside it.
+_AXIS_TEMPLATE = re.compile(
+    r"^\s*axis\s*[=:]\s*(?P<axis>[^,;]+)[,;]\s*(?:side|arm)\s*[=:]\s*(?P<arm>.+)$",
+    re.IGNORECASE,
+)
+
+
 def _parse_axis(value: str) -> tuple[str, str]:
     """"opening style = question" -> ("opening style", "question")."""
     if not value:
         return "", ""
+    template = _AXIS_TEMPLATE.match(value)
+    if template:
+        return template.group("axis").strip().lower(), template.group("arm").strip().lower()
     if "=" in value:
         axis, arm = value.split("=", 1)
     elif ":" in value:
@@ -268,7 +283,28 @@ def _clean_llm_lines(content: str, topic_names: list[str] | None = None) -> list
         line for line in lines
         if not (line.endswith(":") or line.lower().startswith(("here are", "here's", "sure,", "certainly")))
     ]
-    return [_strip_label(line, topic_names or []) for line in lines]
+    return [_strip_wrapping_quotes(_strip_label(line, topic_names or [])) for line in lines]
+
+
+def _strip_wrapping_quotes(line: str) -> str:
+    """Remove quote marks the model wrapped the whole post in.
+
+    2026-09-22 (real published post): a post went out reading
+    `"Bring stress and boredom to your life..."` — the quotes were part of
+    the post text on the account. The prompt says "the post text itself,
+    nothing else" and the model quoted it anyway, which is what small
+    models do with a field whose value is a sentence.
+
+    Only stripped when they wrap the ENTIRE line and are balanced, so a
+    post that legitimately quotes someone mid-sentence is untouched.
+    """
+    text = line.strip()
+    for opening, closing in (('"', '"'), ("'", "'"), ("\u201c", "\u201d"), ("\u2018", "\u2019")):
+        if len(text) > 1 and text.startswith(opening) and text.endswith(closing):
+            inner = text[1:-1]
+            if opening not in inner and closing not in inner:
+                return inner.strip()
+    return text
 
 
 def _strip_label(line: str, topic_names: list[str]) -> str:
@@ -454,11 +490,21 @@ class DraftGenerator:
 
         if controls and prior:
             prompt += (
-                f"REQUIRED: {controls} of these {wanted} post(s) must deliberately "
-                "CONTRADICT the evidence above — do the opposite of what it suggests works, on "
-                "purpose. This is not a mistake and not a fallback. If the evidence is still "
-                "true those posts will do worse and it is confirmed; if they do not do worse, "
-                "the evidence has expired and we need to know. Mark them in EVIDENCE-AGAINST.\n\n"
+                f"REQUIRED: {controls} of these {wanted} post(s) must deliberately go against "
+                "the evidence above — on purpose, not by mistake.\n"
+                "What that means, exactly: the evidence is about HOW a post is written — its "
+                "opening, tone, length, format, whether it uses hashtags or a question. Going "
+                "against it means writing one of those differently on purpose, so we find out "
+                "whether the pattern still holds.\n"
+                "What it does NOT mean: it is never permission to misrepresent the product. Do "
+                "not invert its value, do not describe a problem it solves as something it "
+                "causes, do not write something you would not want a real reader to believe. "
+                "Every post here is still a genuine marketing post for a real product, and "
+                "every claim still has to come from the topic you chose.\n"
+                "If the evidence still holds, those posts do worse and it is confirmed; if they "
+                "do not do worse, the evidence has expired and we need to know. Name what you "
+                "went against in EVIDENCE-AGAINST — writing `none` there means you did not do "
+                "it, so do not write `none` on a post you intended as one.\n\n"
             )
 
         prompt += "VOCABULARY. " + draft_labels.describe_for_prompt() + "\n\n"
@@ -470,7 +516,9 @@ class DraftGenerator:
             "TOPIC: which of the available topics above it is grounded in, copied exactly\n"
             "WHY: one sentence on why you chose that topic for this post\n"
             "IS: comma-separated characteristics of this post\n"
-            "TESTING: one axis and this post's side of it, as `axis = side`\n"
+            "TESTING: what this post varies, and which side it is on, as `<what> = <side>` — "
+            "for example `opening = question` or `hashtags = none`. Write the actual words, "
+            "not the placeholders.\n"
             "EVIDENCE-USED: which evidence above you followed, or `none`\n"
             "EVIDENCE-AGAINST: which evidence you deliberately contradicted, or `none`\n"
             "---\n\n"
@@ -518,6 +566,28 @@ class DraftGenerator:
 
         if not drafts:
             return None
+
+        # The control-arm quota had no teeth until now: it was stated in
+        # the prompt and never checked. A real run asked for 1 control,
+        # got back a draft whose WHY said it was "going against the
+        # general advice" and whose EVIDENCE-AGAINST said `none`, and
+        # nothing noticed — so the quota was simultaneously unmet and
+        # believed to be met. A rule nobody verifies is a wish.
+        supplied = sum(1 for d in drafts if draft_labels.is_control(d))
+        if controls and supplied < controls:
+            print(f"[note] {controls} of these {len(drafts)} draft(s) were required to go against "
+                  f"the evidence, but only {supplied} said they did (EVIDENCE-AGAINST). The "
+                  "shortfall carries to the next run — approving these as they are means this "
+                  "group tests nothing about whether the current pattern still holds.")
+            audit.log_event("draft_generator", "control_arm.short", required=controls,
+                             supplied=supplied, batch=len(drafts))
+
+        # Fold the batch's labels into the vocabulary so the next run is
+        # shown them — the registries were read but never written until
+        # 2026-09-22, which made describe_for_prompt() permanently say
+        # "nothing recorded yet".
+        draft_labels.confirm_new_labels(draft_labels.record_from_drafts(drafts))
+
         for problem in draft_labels.validate_group(drafts):
             # Reported, not rejected. A batch of 1 (the default) cannot
             # contain a contrast at all, so refusing here would mean never
