@@ -30,6 +30,7 @@ one human confirmation, exactly as a new topic does in topic_index.py.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -136,11 +137,45 @@ def describe_for_prompt() -> str:
     return " ".join(parts)
 
 
+# How many separate things a control post claims to have contradicted. One
+# is a test; three is a redesign nothing can be learned from.
+#
+# Two is already too many: the whole value of a control is that one thing
+# changed, so a control naming two changes is exactly the case worth
+# catching. (Briefly set to three while a synthetic test fixture tripped
+# it — that was weakening a real check to satisfy fake data, and by three
+# changes a post is a rewrite, not a test.)
+#
+# Counting free text does misfire: "used a statement and got a like" is
+# one change plus its result, not two changes. That is acceptable here
+# because this prints a note rather than blocking anything, and because
+# the instruction now asks the model to name one thing plainly — prose
+# vague enough to trip this is itself a sign the control is not crisp.
+_SEPARATORS = re.compile(r",|;| and | plus | as well as ", re.IGNORECASE)
+MAX_CONTROL_CLAIMS = 1
+
+
+def _count_claims(text: str) -> int:
+    return len([part for part in _SEPARATORS.split(text or "") if len(part.strip()) > 3])
+
+
 def validate_group(drafts: list[dict[str, Any]]) -> list[str]:
     """Problems with a batch's test axes. Empty list = it is a real test.
 
-    The rule being checked: an axis only tests something if at least two
-    drafts share it and sit on different arms.
+    Three things are checked, all of them found by a real post rather than
+    imagined:
+
+    1. An axis only tests something if at least two drafts share it and
+       sit on different arms.
+    2. A draft with no axis at all is not part of any comparison. The
+       first post published under this design filled EVIDENCE-AGAINST but
+       left TESTING blank, so it could never be grouped with anything —
+       and this function said nothing, because it only looked at drafts
+       that *had* an axis.
+    3. A control that contradicts several things at once isolates
+       nothing. That same post went against "tone, hashtags and
+       questions" in one go: whatever it scores, there is no way to tell
+       which change caused it. The point of a control is one variable.
     """
     problems = []
     by_axis: dict[str, set[str]] = {}
@@ -153,6 +188,24 @@ def validate_group(drafts: list[dict[str, Any]]) -> list[str]:
             problems.append(
                 f"axis {axis!r} has every draft on the same side ({', '.join(sorted(arms))}) — "
                 "nothing is being compared, so it tests nothing"
+            )
+
+    without_axis = [d for d in drafts if not d.get("test_axis")]
+    if without_axis:
+        problems.append(
+            f"{len(without_axis)} draft(s) name no test axis at all — they cannot be grouped "
+            "with anything later, so whatever they score answers no question"
+        )
+
+    for d in drafts:
+        if not is_control(d):
+            continue
+        claims = _count_claims(d.get("evidence_against", ""))
+        if claims > MAX_CONTROL_CLAIMS:
+            problems.append(
+                f"a control draft contradicts {claims} things at once "
+                f"({d.get('evidence_against', '')[:90]}) — if it performs differently, nothing "
+                "says which change did it. A control should vary one thing"
             )
     return problems
 
