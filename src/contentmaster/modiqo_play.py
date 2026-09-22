@@ -41,7 +41,7 @@ from .config import settings
 from .slug import slugify
 from .tracking_review import CHECKPOINT_MATURITY_ORDER
 
-PLAYS_DIR = settings.project_root / "plays"
+PLAYS_DIR = settings.data_root / "plays"
 HISTORY_PATH = PLAYS_DIR / "_history.jsonl"
 WORKSPACE = "contentmaster"
 
@@ -166,6 +166,49 @@ def _append_history(
     }
     with HISTORY_PATH.open("a") as fh:
         fh.write(json.dumps(record, default=str) + "\n")
+
+
+def comparable_history(channel: str, checkpoint: str,
+                       exclude_post_ids: set[str] | None = None) -> list[dict[str, Any]]:
+    """Raw count dicts for prior posts that this post can legitimately be
+    compared against — scoring.judge()'s baseline.
+
+    Filtered to the same channel and the same checkpoint tier (24h only
+    ever compares against 24h). Rows whose `metrics` predate raw-count
+    storage are skipped rather than treated as zeros: under the weighted
+    sum a missing count and a real zero are indistinguishable in the
+    score but mean completely different things, and silently counting old
+    rows as zeros would drag the baseline percentile to the floor exactly
+    when the account starts getting real engagement.
+
+    NOT yet filtered by account era or by the product/document identity —
+    both columns are still being added (docs/SCHEDULE.md Phase 10). When
+    they land they belong here AND in
+    warehouse/models/staging/stg_success_history.sql: filtering in Python
+    only leaks silently into the marts with no error.
+    """
+    if not HISTORY_PATH.exists():
+        return []
+    exclude = exclude_post_ids or set()
+    rows = []
+    with HISTORY_PATH.open() as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            if record.get("channel") != channel or record.get("checkpoint") != checkpoint:
+                continue
+            metrics = record.get("metrics") or {}
+            if "like_count" not in metrics:
+                continue  # predates raw-count storage — cannot be scored
+            # `engagement_score` may be absent on a row written during a
+            # field-shape change; scoring.score_of() recomputes it from the
+            # raw counts rather than letting it read as 0.
+            if metrics.get("post_id") in exclude:
+                continue
+            rows.append(metrics)
+    return rows
 
 
 def find_best_prior(

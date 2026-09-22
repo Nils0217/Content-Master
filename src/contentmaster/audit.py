@@ -9,7 +9,7 @@ from typing import Any
 
 from .config import settings
 
-LOG_PATH = settings.project_root / "audit" / "events.jsonl"
+LOG_PATH = settings.data_root / "audit" / "events.jsonl"
 
 
 def log_event(stage: str, event: str, **fields: Any) -> None:

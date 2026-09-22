@@ -29,7 +29,7 @@ from typing import Any
 
 from .config import settings
 
-QUEUE_PATH = settings.project_root / "plays" / "_analysis_review.jsonl"
+QUEUE_PATH = settings.data_root / "plays" / "_analysis_review.jsonl"
 
 
 def _now_iso() -> str:

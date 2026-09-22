@@ -46,8 +46,8 @@ class AnalysisResult:
     channel: str
     checkpoint: str
     n_prior_posts: int
-    historical_avg_ctr: float | None
-    current_ctr: float
+    historical_avg_score: float | None
+    current_score: float
     trend: str  # no_warehouse | no_history | insufficient_for_trend | improving | declining | flat
     prior_suggestion: str
     prior_suggestion_effectiveness: str  # unknown | looks_effective | looks_ineffective
@@ -66,8 +66,8 @@ class AnalysisResult:
             "channel": self.channel,
             "checkpoint": self.checkpoint,
             "n_prior_posts": self.n_prior_posts,
-            "historical_avg_ctr": self.historical_avg_ctr,
-            "current_ctr": self.current_ctr,
+            "historical_avg_score": self.historical_avg_score,
+            "current_score": self.current_score,
             "trend": self.trend,
             "prior_suggestion": self.prior_suggestion,
             "prior_suggestion_effectiveness": self.prior_suggestion_effectiveness,
@@ -95,7 +95,7 @@ def _query_history(product_name: str, channel: str, checkpoint: str) -> list[dic
         con = duckdb.connect(str(db_path), read_only=True)
         try:
             rows = con.execute(
-                "select ts, ctr, improvement_note, external_cat_search_interest "
+                "select ts, engagement_score, improvement_note, external_cat_search_interest "
                 "from performance_history "
                 "where product = ? and channel = ? and status = 'published' "
                 "and checkpoint = ? order by ts",
@@ -104,7 +104,7 @@ def _query_history(product_name: str, channel: str, checkpoint: str) -> list[dic
         finally:
             con.close()
         return [
-            {"ts": r[0], "ctr": r[1], "improvement_note": r[2], "external_interest": r[3]}
+            {"ts": r[0], "engagement_score": r[1], "improvement_note": r[2], "external_interest": r[3]}
             for r in rows
         ]
     except Exception:  # noqa: BLE001 — analysis degrading gracefully beats crashing the pipeline
@@ -113,7 +113,7 @@ def _query_history(product_name: str, channel: str, checkpoint: str) -> list[dic
 
 def _query_external_signal(history: list[dict[str, Any]]) -> str:
     """Phase 1/9's 'cross validate against other data' half: does this
-    product/channel's ctr look any different on days with higher external
+    product/channel's engagement score look any different on days with higher external
     (Google Trends "cat") search interest? Sample sizes here are tiny, so
     this stays descriptive, not a real statistical claim — it's context
     for a human/LLM to weigh, not a verdict.
@@ -126,7 +126,7 @@ def _query_external_signal(history: list[dict[str, Any]]) -> str:
         return (
             f"External signal: today's Google Trends 'cat' search interest is {latest} "
             f"(0-100 scale). Only {len(with_interest)} published post(s) have this data "
-            "so far — not enough to say whether it correlates with ctr yet."
+            "so far — not enough to say whether it correlates with engagement yet."
         )
     avg_interest = sum(h["external_interest"] for h in with_interest) / len(with_interest)
     high = [h for h in with_interest if h["external_interest"] > avg_interest]
@@ -136,13 +136,13 @@ def _query_external_signal(history: list[dict[str, Any]]) -> str:
             f"External signal: search interest has been flat around {avg_interest:.0f} across "
             f"all {len(with_interest)} published posts — no high/low split to compare yet."
         )
-    avg_ctr_high = sum(h["ctr"] or 0.0 for h in high) / len(high)
-    avg_ctr_low = sum(h["ctr"] or 0.0 for h in low) / len(low)
-    direction = "higher" if avg_ctr_high > avg_ctr_low else "lower"
+    avg_score_high = sum(h["engagement_score"] or 0.0 for h in high) / len(high)
+    avg_score_low = sum(h["engagement_score"] or 0.0 for h in low) / len(low)
+    direction = "higher" if avg_score_high > avg_score_low else "lower"
     return (
-        f"External signal: posts on above-average search-interest days (avg ctr "
-        f"{avg_ctr_high:.4f}, n={len(high)}) look {direction} than below-average days "
-        f"(avg ctr {avg_ctr_low:.4f}, n={len(low)}) — small n, treat as a hint, not proof."
+        f"External signal: posts on above-average search-interest days (avg score "
+        f"{avg_score_high:.4f}, n={len(high)}) look {direction} than below-average days "
+        f"(avg score {avg_score_low:.4f}, n={len(low)}) — small n, treat as a hint, not proof."
     )
 
 
@@ -150,7 +150,7 @@ def _query_trending_context() -> str:
     """Pulls the 3 Google Trends 'related queries' reference tables (see
     warehouse/models/staging/stg_google_trends_related_top.sql,
     ..._related_rising.sql, ..._region.sql) into a short block of text —
-    not for the ctr cross-validation above, but as grounding for
+    not for the engagement cross-validation above, but as grounding for
     discuss.py's strategy proposals ("what's actually trending around this
     topic right now"). Empty string (never raises) if the warehouse or
     those tables aren't there.
@@ -203,7 +203,7 @@ def _query_trending_context() -> str:
 def analyze_performance(
     product_name: str,
     channel: str,
-    current_ctr: float,
+    current_score: float,
     checkpoint: str = "24h",
 ) -> AnalysisResult:
     """Cross-validates this run's result against this product/channel's
@@ -226,7 +226,7 @@ def analyze_performance(
     if history is None:
         result = AnalysisResult(
             product=product_name, channel=channel, checkpoint=checkpoint, n_prior_posts=0,
-            historical_avg_ctr=None, current_ctr=current_ctr, trend="no_warehouse",
+            historical_avg_score=None, current_score=current_score, trend="no_warehouse",
             prior_suggestion="", prior_suggestion_effectiveness="unknown",
             evidence="warehouse/local.duckdb not found — run `dbt run` in warehouse/ to enable "
                      "real cross-validation. Proceeding with no history.",
@@ -234,7 +234,7 @@ def analyze_performance(
     elif not history:
         result = AnalysisResult(
             product=product_name, channel=channel, checkpoint=checkpoint, n_prior_posts=0,
-            historical_avg_ctr=None, current_ctr=current_ctr, trend="no_history",
+            historical_avg_score=None, current_score=current_score, trend="no_history",
             prior_suggestion="", prior_suggestion_effectiveness="unknown",
             evidence=f"No prior published posts with a completed {checkpoint} checkpoint for this "
                      "product/channel — this is the first data point at this tier, nothing to "
@@ -242,46 +242,46 @@ def analyze_performance(
         )
     else:
         n = len(history)
-        avg_ctr = sum(h["ctr"] or 0.0 for h in history) / n
-        delta = current_ctr - avg_ctr
+        avg_score = sum(h["engagement_score"] or 0.0 for h in history) / n
+        delta = current_score - avg_score
 
         if n < 2:
             trend = "insufficient_for_trend"
-        elif avg_ctr == 0:
-            trend = "improving" if current_ctr > 0 else "flat"
-        elif delta > avg_ctr * TREND_THRESHOLD:
+        elif avg_score == 0:
+            trend = "improving" if current_score > 0 else "flat"
+        elif delta > avg_score * TREND_THRESHOLD:
             trend = "improving"
-        elif delta < -avg_ctr * TREND_THRESHOLD:
+        elif delta < -avg_score * TREND_THRESHOLD:
             trend = "declining"
         else:
             trend = "flat"
 
         last = history[-1]
         prior_suggestion = last.get("improvement_note") or ""
-        last_ctr = last["ctr"] or 0.0
+        last_score = last["engagement_score"] or 0.0
         if not prior_suggestion:
             effectiveness = "unknown"
-        elif current_ctr > last_ctr:
+        elif current_score > last_score:
             effectiveness = "looks_effective"
         else:
             effectiveness = "looks_ineffective"
 
         evidence = (
             f"[{checkpoint} checkpoint — {question}] "
-            f"{n} prior post(s) at this tier; historical avg ctr={avg_ctr:.4f}, "
-            f"current ctr={current_ctr:.4f} (delta={delta:+.4f})."
+            f"{n} prior post(s) at this tier; historical avg score={avg_score:.4f}, "
+            f"current score={current_score:.4f} (delta={delta:+.4f})."
         )
         if prior_suggestion:
             support = "supports" if effectiveness == "looks_effective" else "does not support"
             evidence += (
-                f" Prior suggestion was {prior_suggestion!r} — ctr went from {last_ctr:.4f} to "
-                f"{current_ctr:.4f} since, which {support} it (single data point, not "
+                f" Prior suggestion was {prior_suggestion!r} — score went from {last_score:.4f} to "
+                f"{current_score:.4f} since, which {support} it (single data point, not "
                 f"statistically validated)."
             )
 
         result = AnalysisResult(
             product=product_name, channel=channel, checkpoint=checkpoint, n_prior_posts=n,
-            historical_avg_ctr=avg_ctr, current_ctr=current_ctr, trend=trend,
+            historical_avg_score=avg_score, current_score=current_score, trend=trend,
             prior_suggestion=prior_suggestion, prior_suggestion_effectiveness=effectiveness,
             evidence=evidence,
         )
@@ -310,9 +310,9 @@ def confirm_with_human(result: AnalysisResult, recommendation: str) -> AnalysisR
     print(f"ANALYSIS  {result.product} · {result.channel} · checkpoint={result.checkpoint}")
     print("-" * 60)
     print(f"prior published posts : {result.n_prior_posts}")
-    if result.historical_avg_ctr is not None:
-        print(f"historical avg ctr     : {result.historical_avg_ctr:.4f}")
-    print(f"current ctr            : {result.current_ctr:.4f}")
+    if result.historical_avg_score is not None:
+        print(f"historical avg score   : {result.historical_avg_score:.4f}")
+    print(f"current score          : {result.current_score:.4f}")
     print(f"trend                  : {result.trend}")
     if result.prior_suggestion:
         print(f"prior suggestion       : {result.prior_suggestion!r}")

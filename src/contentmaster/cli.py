@@ -46,6 +46,17 @@ def _cmd_review(args: argparse.Namespace) -> int:
     return _pipeline.run_review(checkpoint=args.checkpoint, terminal=args.terminal)
 
 
+def _cmd_status(args: argparse.Namespace) -> int:
+    from .pending import print_status
+
+    print_status()
+    return 0
+
+
+def _cmd_refresh(args: argparse.Namespace) -> int:
+    return _pipeline.refresh_metrics()
+
+
 def _cmd_platforms(args: argparse.Namespace) -> int:
     from .platforms.registry import PLANNED_PLATFORMS, PLATFORMS
 
@@ -198,6 +209,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_review.set_defaults(func=_cmd_review)
 
+    p_refresh = sub.add_parser(
+        "refresh",
+        help="Re-read engagement for every tracked post under 30 days old (no analysis, "
+             "no human decision — safe to run as often as you like)",
+    )
+    p_refresh.set_defaults(func=_cmd_refresh)
+
+    p_status = sub.add_parser(
+        "status",
+        help="What needs a human right now: failed publishes, drafts and analyses waiting, "
+             "and which errors keep repeating",
+    )
+    p_status.set_defaults(func=_cmd_status)
+
     p_platforms = sub.add_parser("platforms", help="List implemented and planned platforms")
     p_platforms.set_defaults(func=_cmd_platforms)
 
@@ -214,7 +239,34 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    _warn_if_isolated_data_root()
+    # 2026-09-21: printed before every command, because the previous
+    # notification surface was the stdout of a background Streamlit
+    # process. A post failed to publish and nobody saw it for two days.
+    # Silent when there is nothing pending — a banner that always prints
+    # stops being read.
+    if args.func is not _cmd_status:
+        from .pending import print_startup_banner
+
+        print_startup_banner()
     return args.func(args) or 0
+
+
+def _warn_if_isolated_data_root() -> None:
+    """Say it out loud when CONTENTMASTER_DATA_ROOT is redirecting writes.
+
+    The whole point of the setting is that a test run leaves no trace in
+    the real ledger, and the failure it guards against is the inverse:
+    believing you are in test mode when you are not (which is how
+    `ZZ_DISPOSABLE_TEST` ended up in plays/_history.jsonl). One line at
+    the top of every command makes the current mode impossible to
+    misread.
+    """
+    from .config import settings
+
+    if settings.is_isolated_data_root:
+        print(f"[test data root] Writing to {settings.data_root} — "
+              "nothing this run does will touch the real ledger.\n")
 
 
 if __name__ == "__main__":

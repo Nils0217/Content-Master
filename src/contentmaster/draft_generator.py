@@ -20,9 +20,205 @@ from typing import Any
 
 import requests
 
+from .config import settings
+
+from .scoring import score_of as _score_of
+
 _LLM_ENDPOINT = os.environ.get("LLM_IMPROVE_ENDPOINT", "http://localhost:11434/v1/chat/completions")
 _LLM_MODEL = os.environ.get("LLM_IMPROVE_MODEL", "llama3.2:3b")
 
+
+def _limit_instruction(channel: str) -> str:
+    """The channel's own hard rules, read from its adapter.
+
+    2026-09-21: replaces "under 280 characters", which was hardcoded as a
+    string in four separate prompts here while the adapter declared 300.
+    Neither number was wrong on its own — having two was. The LLM was told
+    280, produced 322, and nothing checked until the platform rejected it
+    (draft-2d62b063).
+    """
+    try:
+        from .platforms.registry import get_platform
+
+        described = get_platform(channel).constraints.describe_for_prompt()
+    except Exception:
+        # An unimplemented channel has no constraints to state. Saying
+        # nothing is correct; inventing a number is how this started.
+        return ""
+    return f" Hard platform rules: {described}." if described else ""
+
+
+def _enforce_constraints(lines: list[str], channel: str) -> list[str]:
+    """Drop generated lines that break the channel's hard rules.
+
+    2026-09-21: a draft that violates a published platform limit must
+    never reach the review queue. It cannot be published, so offering it
+    for human approval wastes the reviewer's attention and — before
+    step5_publish started refusing — ended with the platform rejecting it
+    after the human had already approved it (draft-2d62b063, 322 chars).
+
+    Dropping rather than truncating: cutting 22 characters off the end
+    removes whatever the writer put last, which on these posts is the
+    hashtags or the closing line. Returning fewer drafts is honest;
+    returning a mangled one is not.
+    """
+    try:
+        from .platforms.registry import get_platform
+
+        constraints = get_platform(channel).constraints
+    except Exception:
+        return lines
+    kept = []
+    for line in lines:
+        problems = constraints.violations(line)
+        if problems:
+            print(f"[dropped] A generated draft broke {channel}'s rules and was not queued: "
+                  f"{'; '.join(problems)}.")
+            continue
+        kept.append(line)
+    return kept
+
+
+# --- structured draft blocks -------------------------------------------
+#
+# 2026-09-21. The model no longer returns one post per line. It has to say
+# which topic it chose and why, what each draft IS, what it is TESTING,
+# and which evidence it deliberately went against — none of which fits on
+# one line.
+#
+# A block format rather than JSON on purpose: docs/ERROR_LOG.md already
+# records `llama3.2:1b` producing unusable structured output, and a 3B
+# model that drops a closing brace destroys a whole JSON document, while a
+# malformed block costs one draft. Every field except POST is optional at
+# parse time for the same reason — a draft that arrives without a test
+# axis is still a usable draft, and validate_group() will say so.
+_BLOCK_SEPARATOR = "---"
+_FIELD_PATTERN = re.compile(r"^(POST|TOPIC|WHY|IS|TESTING|EVIDENCE-USED|EVIDENCE-AGAINST)\s*:\s*(.*)$",
+                            re.IGNORECASE)
+
+
+def _parse_blocks(content: str) -> list[dict[str, Any]]:
+    blocks, current, last_key = [], {}, None
+    for raw in content.splitlines():
+        line = raw.strip()
+        if line.startswith(_BLOCK_SEPARATOR) and set(line) <= {"-"}:
+            if current.get("POST"):
+                blocks.append(current)
+            current, last_key = {}, None
+            continue
+        match = _FIELD_PATTERN.match(line)
+        if match:
+            last_key = match.group(1).upper()
+            current[last_key] = match.group(2).strip()
+        elif line and last_key:
+            # A wrapped continuation line. Only POST is worth joining; a
+            # model rambling after TESTING is noise, not more label.
+            if last_key == "POST":
+                current["POST"] = (current["POST"] + " " + line).strip()
+    if current.get("POST"):
+        blocks.append(current)
+    return blocks
+
+
+def _split_labels(value: str) -> list[str]:
+    return [p.strip().lower() for p in re.split(r"[,;]", value or "") if p.strip()]
+
+
+def _parse_axis(value: str) -> tuple[str, str]:
+    """"opening style = question" -> ("opening style", "question")."""
+    if not value:
+        return "", ""
+    if "=" in value:
+        axis, arm = value.split("=", 1)
+    elif ":" in value:
+        axis, arm = value.split(":", 1)
+    else:
+        return value.strip().lower(), ""
+    return axis.strip().lower(), arm.strip().lower()
+
+
+def _match_topic(name: str, topics: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Map the model's TOPIC back to a real index entry.
+
+    Exact match first, then case-insensitive, then a prefix match — a 3B
+    model writes "Risks" for "Risks" but also "risks " and occasionally
+    "Risks (outdoor)". Anything it cannot resolve returns None and the
+    draft is dropped: a draft filed under a topic that does not exist would
+    corrupt the usage counts that topic selection now reads (this is the
+    same failure recorded at draft_generator.py's strict-pairing comment).
+    """
+    if not name:
+        return None
+    wanted = name.strip().lower()
+    for t in topics:
+        if t["topic"].strip().lower() == wanted:
+            return t
+    for t in topics:
+        actual = t["topic"].strip().lower()
+        if wanted.startswith(actual) or actual.startswith(wanted):
+            return t
+    return None
+
+def _trending_for_prompt() -> str:
+    """Current search interest, stated with the date it was captured.
+
+    2026-09-21. Until now trends reached drafting only second-hand: the
+    analysis step wrote them into an `improvement_note` as prose, and that
+    whole note was pasted into the next generation prompt. So the model
+    saw stale data quoted inside an even staler opinion, with no date
+    attached, and could not tell how old any of it was.
+
+    The data is still hand-exported seed CSV (warehouse/seeds/), currently
+    ending 2026-09-13 — automating the refresh is scheduled, not done. The
+    date is therefore not decoration: "cat litter" as a steady top search
+    is fine a week later, while a breakout trend a week later is
+    archaeology, and only the model can judge which matters for the post
+    it is writing. Saying when the data is from is what makes that
+    judgement possible.
+
+    Region is deliberately excluded. Where the audience is already a human
+    decision (--target-region, see topic_index.load_target); adding "these
+    countries search for this most" would quietly compete with it.
+    """
+    db_path = settings.project_root / "warehouse" / "local.duckdb"
+    if not db_path.exists():
+        return ""
+    try:
+        import duckdb
+
+        con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            top = [r[0] for r in con.execute(
+                "select query from stg_google_trends_related_top order by score desc limit 8"
+            ).fetchall()]
+            rising = con.execute(
+                "select query, is_breakout, growth_pct from stg_google_trends_related_rising "
+                "order by is_breakout desc, growth_pct desc nulls first limit 5"
+            ).fetchall()
+            as_of = con.execute(
+                "select max(day) from stg_google_trends_timeline"
+            ).fetchone()
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001 — optional context, never worth failing a run over
+        return ""
+
+    if not top and not rising:
+        return ""
+    captured = str(as_of[0])[:10] if as_of and as_of[0] else "an unknown date"
+    parts = [f"SEARCH INTEREST, captured {captured} (judge for yourself whether it is still "
+             "current — this data is not live):"]
+    if top:
+        parts.append("- Steady top related searches: " + ", ".join(top) + ".")
+    if rising:
+        described = ", ".join(
+            f"{q} ({'breakout' if b else f'+{int(g)}%' if g else 'rising'})" for q, b, g in rising
+        )
+        parts.append(f"- Rising searches as of {captured}: {described}. These move fast and go "
+                     "stale faster than the steady ones.")
+    parts.append("You may use any of this as a hook, or ignore it. Nothing here is a fact about "
+                 "the product, so it cannot be used as a claim.")
+    return "\n".join(parts)
 
 def _target_instruction(target: dict[str, Any] | None) -> str:
     """2026-09-18 (real design review): a target is opt-in and currently
@@ -149,7 +345,7 @@ class DraftGenerator:
         """
         name = product.get("name", "the product")
         if topics:
-            drafts = self._llm_draft_posts_for_topics(name, channel, topics, prior, target)
+            drafts = self._llm_draft_posts_for_topics(name, channel, topics, prior, target, n=n)
             if drafts:
                 return drafts
         if context.strip():
@@ -180,87 +376,158 @@ class DraftGenerator:
 
     def _llm_draft_posts_for_topics(
         self, name: str, channel: str, topics: list[dict[str, Any]], prior: dict[str, Any] | None = None,
-        target: dict[str, Any] | None = None,
+        target: dict[str, Any] | None = None, n: int | None = None,
     ) -> list[dict[str, Any]] | None:
-        """One draft per topic, each grounded only in that topic's brief —
-        real variety from distinct extracted facts, not a shuffled reword
-        of one shared context blob. Returns None on any failure so the
-        caller can fall back — never raises.
+        """Drafts grounded in the whitepaper's extracted topics.
+
+        2026-09-21, /grill-me redesign. What changed and why:
+
+        * The model now CHOOSES its topics instead of being handed one per
+          draft. Topic selection used to happen in pick_topics() before the
+          model saw anything, and was then stated as an absolute rule
+          ("ground each post only in the fact given for its own topic"),
+          while the improvement note was appended at the end hedged with
+          "where it makes sense". Those two instructions contradicted each
+          other and the absolute one always won — so the advice could never
+          change what a post was about, only how it was worded. Twelve
+          posts about indoor/outdoor cat risks is what that produces.
+        * Usage counts are shown rather than enforced. The model cannot see
+          its own history, which is the actual reason it repeats itself;
+          being told is enough, and a hard "not the same topic twice" rule
+          would just be pick_topics() again under another name.
+        * Prior results are given as EVIDENCE, with no verb attached. The
+          old line "Apply that improvement across all the posts below" is
+          gone. Phase 10 settled that a proven pattern is evidence and not
+          an instruction; this is that decision reaching the prompt.
+        * A share of every group MUST contradict the evidence — see
+          scoring.control_arm_size(). Wording alone cannot stop an LLM
+          treating a statistic as an order, so the control arm is required
+          rather than encouraged.
+        * Each draft declares what it IS and what it is TESTING, reusing
+          the existing vocabulary where it fits (draft_labels.py).
+
+        Returns None on any failure so the caller can fall back — never
+        raises.
         """
-        n = len(topics)
+        from . import draft_labels
+
+        wanted = n or len(topics)
+        # Counted across a whole test group, not this batch — a batch of 1
+        # can never be 20% of anything (draft_labels.controls_needed).
+        controls = draft_labels.controls_needed(name, channel, wanted)
         topic_lines = "\n".join(
-            f"Topic {i}: {t['topic']} — {t['brief']}" for i, t in enumerate(topics, start=1)
+            f"- {t['topic']} (used {t.get('used_count', 0)} time(s)): {t['brief']}"
+            for t in topics
         )
+
         prompt = (
-            f"Here is a product called '{name}'. Write one short marketing post for {channel} "
-            f"(under 280 characters) for EACH of the following {n} distinct topics extracted "
-            f"from its source document. Ground each post only in the fact given for its own "
-            f"topic — do not invent claims, and do not mix facts from other topics into it.\n\n"
-            f"{topic_lines}\n\n"
+            f"You are writing {wanted} short marketing post(s) for {channel} about a product "
+            f"called '{name}'.\n\n"
+            f"AVAILABLE TOPICS, extracted from the product's source document. Choose which to "
+            f"write about — you may use the same topic more than once or leave some unused. "
+            f"The usage counts are there so you can see what has already been covered a lot; "
+            f"they are information, not a rule.\n{topic_lines}\n\n"
+            "GROUNDING: every factual claim you make must come from the topic you chose. Do not "
+            "invent claims. How you frame the post — the opening, the format, whether you ask a "
+            "question, whether you reference something topical — is entirely yours.\n"
         )
+        prompt += _limit_instruction(channel).strip() + "\n\n" if _limit_instruction(channel) else "\n"
+
+        trends = _trending_for_prompt()
+        if trends:
+            prompt += trends + "\n\n"
+
         if prior:
             m = prior.get("last_metrics", {})
             prompt += (
-                f"A previous post for this product/channel was: \"{prior.get('winning_text', '')}\"\n"
-                f"Its real results: {m.get('clicks', 0)} likes, {m.get('conversions', 0)} reposts, "
-                f"ctr={m.get('ctr', 0)}.\n"
-                f"An LLM review of that result suggested this specific improvement: "
-                f"\"{prior.get('improvement_note', '')}\"\n"
+                "EVIDENCE from what has been published before. This is a record of what happened, "
+                "not an instruction:\n"
+                f"- A previous post read: \"{prior.get('winning_text', '')}\"\n"
+                f"- It got {m.get('like_count', 0)} like(s), {m.get('repost_count', 0)} repost(s), "
+                f"{m.get('reply_count', 0)} reply(ies), {m.get('bookmark_count', 0)} bookmark(s) "
+                f"(engagement score {_score_of(m)}).\n"
             )
-            # 2026-09-16: a human reviewer's own feedback (from
-            # analysis.confirm_with_human()), stored *alongside* the LLM's
-            # improvement_note above, not in place of it — both are shown;
-            # where they conflict, the human's direction wins.
             if prior.get("human_feedback"):
-                prompt += (
-                    f"A human reviewer additionally said: \"{prior['human_feedback']}\"\n"
-                    "Where this differs from the LLM's suggestion above, prioritize what the "
-                    "human said.\n"
-                )
-            prompt += "Apply that improvement across all the posts below where it makes sense.\n\n"
+                prompt += f"- A human reviewer said: \"{prior['human_feedback']}\"\n"
+            prompt += ("You may extend this, improve on it, or deliberately go against it if you "
+                       "can say why.\n\n")
+
+        if controls and prior:
+            prompt += (
+                f"REQUIRED: {controls} of these {wanted} post(s) must deliberately "
+                "CONTRADICT the evidence above — do the opposite of what it suggests works, on "
+                "purpose. This is not a mistake and not a fallback. If the evidence is still "
+                "true those posts will do worse and it is confirmed; if they do not do worse, "
+                "the evidence has expired and we need to know. Mark them in EVIDENCE-AGAINST.\n\n"
+            )
+
+        prompt += "VOCABULARY. " + draft_labels.describe_for_prompt() + "\n\n"
         prompt += _target_instruction(target)
         prompt += (
-            f"Reply with exactly {n} lines, one post per line, IN THE SAME ORDER as the topics "
-            "above (line 1 = Topic 1, etc.). No numbering, no topic labels, no extra commentary."
+            f"Reply with exactly {wanted} block(s) in this format, separated by a line of three "
+            "dashes. Use these field names exactly:\n\n"
+            "POST: the post text itself, nothing else\n"
+            "TOPIC: which of the available topics above it is grounded in, copied exactly\n"
+            "WHY: one sentence on why you chose that topic for this post\n"
+            "IS: comma-separated characteristics of this post\n"
+            "TESTING: one axis and this post's side of it, as `axis = side`\n"
+            "EVIDENCE-USED: which evidence above you followed, or `none`\n"
+            "EVIDENCE-AGAINST: which evidence you deliberately contradicted, or `none`\n"
+            "---\n\n"
+            "No numbering, no commentary outside the fields."
         )
+
         try:
             resp = requests.post(
                 _LLM_ENDPOINT,
                 json={"model": _LLM_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.8},
-                timeout=90,
+                timeout=120,
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"].strip()
         except (requests.RequestException, KeyError, IndexError, json.JSONDecodeError):
             return None
 
-        lines = _clean_llm_lines(content, [t["topic"] for t in topics])
-        if not lines:
-            return None
-
-        # 2026-09-19 (code scan): used to be `lines[i % len(lines)]` while
-        # still labelling draft i with topics[i] — so whenever the model
-        # returned a different number of lines than topics (routine for a
-        # 3B model), a draft got text about one topic tagged with a
-        # different topic's name. step6_queue_for_review() then called
-        # record_topic_used() on that wrong name, permanently skewing
-        # which topics pick_topics() considers "already used". Pair
-        # strictly by position now and return fewer drafts rather than
-        # mislabel any.
-        paired = min(len(lines), n)
-        if paired < n:
-            print(f"[warn] Asked the model for {n} post(s), got {paired} usable line(s) — "
-                  f"writing {paired} draft(s) rather than reusing text under the wrong topic.")
         drafts = []
-        for i in range(paired):
+        for block in _parse_blocks(content):
+            text = _clean_llm_lines(block["POST"])
+            text = text[0] if text else ""
+            if not text:
+                continue
+            topic = _match_topic(block.get("TOPIC", ""), topics)
+            if topic is None:
+                # Dropped rather than guessed: a draft filed under a topic
+                # that does not exist would corrupt the usage counts that
+                # topic selection itself now reads.
+                print(f"[dropped] A draft named topic {block.get('TOPIC', '')!r}, which is not "
+                      "in this product's index — not queued.")
+                continue
+            if _enforce_constraints([text], channel) != [text]:
+                continue
+            axis, arm = _parse_axis(block.get("TESTING", ""))
             drafts.append({
-                "id": f"draft-{uuid.uuid4().hex[:8]}", "channel": channel, "text": lines[i],
-                "status": "draft", "topic": topics[i]["topic"], "brief": topics[i]["brief"],
+                "id": f"draft-{uuid.uuid4().hex[:8]}", "channel": channel, "text": text,
+                "status": "draft", "topic": topic["topic"], "brief": topic["brief"],
                 "source": "topics",
+                "topic_reason": block.get("WHY", ""),
+                "characteristics": _split_labels(block.get("IS", "")),
+                "test_axis": axis, "test_arm": arm,
+                "evidence_used": block.get("EVIDENCE-USED", ""),
+                "evidence_against": block.get("EVIDENCE-AGAINST", ""),
             })
-        return drafts or None
 
-    def revise_post(self, name: str, current_text: str, feedback: str, brief: str = "") -> str | None:
+        if not drafts:
+            return None
+        for problem in draft_labels.validate_group(drafts):
+            # Reported, not rejected. A batch of 1 (the default) cannot
+            # contain a contrast at all, so refusing here would mean never
+            # generating anything; the operator needs to know the batch
+            # proves nothing, which is different from it being unusable.
+            print(f"[note] This batch tests nothing on one axis: {problem}")
+        return drafts[:wanted]
+
+    def revise_post(self, name: str, current_text: str, feedback: str, brief: str = "",
+                    channel: str = "") -> str | None:
         """2026-09-15 — the "big fix" for human_loop's edit flow: a human
         typing feedback like "add some details" used to become the
         *literal* post text (a real broken post went out this way — see
@@ -277,7 +544,7 @@ class DraftGenerator:
             prompt += f"It's grounded in this fact: {brief}\n"
         prompt += (
             f"A reviewer asked for this specific change: \"{feedback}\"\n"
-            "Rewrite the post applying that change. Keep it under 280 characters, still "
+            "Rewrite the post applying that change." + _limit_instruction(channel) + " Still "
             "grounded in the same fact above — do not invent new claims. Reply with ONLY "
             "the revised post text, no commentary, no quotes around it."
         )
@@ -291,7 +558,7 @@ class DraftGenerator:
             content = resp.json()["choices"][0]["message"]["content"].strip()
         except (requests.RequestException, KeyError, IndexError, json.JSONDecodeError):
             return None
-        lines = _clean_llm_lines(content)
+        lines = _enforce_constraints(_clean_llm_lines(content), channel)
         return lines[0] if lines else None
 
     def _llm_draft_posts(
@@ -310,8 +577,10 @@ class DraftGenerator:
             m = prior.get("last_metrics", {})
             prompt += (
                 f"A previous post for this product/channel was: \"{prior.get('winning_text', '')}\"\n"
-                f"Its real results: {m.get('clicks', 0)} likes, {m.get('conversions', 0)} reposts, "
-                f"ctr={m.get('ctr', 0)}.\n"
+                f"Its real results: {m.get('like_count', 0)} likes, "
+                f"{m.get('repost_count', 0)} reposts, {m.get('reply_count', 0)} replies, "
+                f"{m.get('bookmark_count', 0)} bookmarks "
+                f"(engagement score {_score_of(m)}).\n"
                 f"An LLM review of that result suggested this specific improvement: "
                 f"\"{prior.get('improvement_note', '')}\"\n"
             )
@@ -324,16 +593,18 @@ class DraftGenerator:
                 )
             prompt += _target_instruction(target)
             prompt += (
-                f"\nWrite {n} distinct, NEW short marketing posts for {channel} (under 280 characters "
-                "each) that actually apply that improvement and are not just a reword of the previous "
+                f"\nWrite {n} distinct, NEW short marketing posts for {channel}"
+                + _limit_instruction(channel)
+                + " They must actually apply that improvement and are not just a reword of the previous "
                 "post. Still ground every claim in the source text above — do not invent claims not "
                 "supported by it. Reply with exactly one post per line, no numbering, no extra commentary."
             )
         else:
             prompt += _target_instruction(target)
             prompt += (
-                f"Write {n} distinct, short marketing posts for {channel} (under 280 characters "
-                "each) that reference concrete facts from the text above. Do not invent claims "
+                f"Write {n} distinct, short marketing posts for {channel}"
+                + _limit_instruction(channel)
+                + " They must reference concrete facts from the text above. Do not invent claims "
                 "not supported by the text. Reply with exactly one post per line, no numbering, "
                 "no extra commentary."
             )
@@ -348,7 +619,7 @@ class DraftGenerator:
         except (requests.RequestException, KeyError, IndexError, json.JSONDecodeError):
             return None
 
-        lines = _clean_llm_lines(content)
+        lines = _enforce_constraints(_clean_llm_lines(content), channel)
         if not lines:
             return None
         # Same positional pairing as _llm_draft_posts_for_topics() — there

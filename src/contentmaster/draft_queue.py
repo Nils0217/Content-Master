@@ -21,7 +21,7 @@ from typing import Any
 
 from .config import settings
 
-QUEUE_PATH = settings.project_root / "plays" / "_draft_review.jsonl"
+QUEUE_PATH = settings.data_root / "plays" / "_draft_review.jsonl"
 
 
 def _now_iso() -> str:
@@ -31,7 +31,7 @@ def _now_iso() -> str:
 def queue_draft(
     draft_id: str, product: str, channel: str, text: str,
     topic: str = "", brief: str = "", image_path: str | None = None,
-    source: str = "unknown",
+    source: str = "unknown", labels: dict[str, Any] | None = None,
 ) -> None:
     """Called once per draft, right after it (and its image, if any) is
     generated. `status` starts as "pending"; review actions append an
@@ -55,6 +55,12 @@ def queue_draft(
         "text": text, "topic": topic, "brief": brief, "image_path": image_path,
         "source": source, "status": "pending", "reviewer_note": "",
         "edited": False, "ts": _now_iso(),
+        # 2026-09-21: what the model said this draft IS, what it is
+        # TESTING, and which evidence it deliberately went against. Stored
+        # here because this is the only ledger every draft reaches —
+        # tracking_review only ever sees the ones that publish, and the
+        # control-arm quota has to be counted across drafts either way.
+        **(labels or {}),
     }
     with QUEUE_PATH.open("a") as fh:
         fh.write(json.dumps(record, default=str) + "\n")

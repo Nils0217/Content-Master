@@ -163,7 +163,7 @@ def review_image(
     """
     from .config import settings
 
-    out_dir = settings.project_root / "generated_images"
+    out_dir = settings.data_root / "generated_images"
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{draft_id or 'draft'}.png"
 

@@ -27,13 +27,23 @@ from .base import (
     PlatformAuthError,
     PlatformConfigError,
     PlatformRateLimitError,
+    PlatformConstraints,
+    PlatformContentRejected,
     Post,
+    PostNotFoundError,
 )
 
 
 class BlueskyPlatform(Platform):
     name = "bluesky"
-    max_post_chars = 300
+    # Bluesky's own published limits. 300 graphemes for the post; 4 images
+    # per post; 2000 characters of alt text each.
+    constraints = PlatformConstraints(
+        max_post_chars=300,
+        max_images=4,
+        max_image_alt_chars=2000,
+        supported_image_types=("image/jpeg", "image/png", "image/webp", "image/gif"),
+    )
 
     def __init__(self, cfg: BlueskySettings | None = None):
         self.cfg = cfg or settings.bluesky
@@ -121,7 +131,7 @@ class BlueskyPlatform(Platform):
         # failure (printed warning + simulated publish), so the operator
         # sees it without losing the rest of the run.
         if len(text) > self.max_post_chars:
-            raise PlatformAPIError(
+            raise PlatformContentRejected(
                 f"Bluesky posts are capped at {self.max_post_chars} characters, got {len(text)}. "
                 "Shorten the draft in review and approve it again."
             )
@@ -142,26 +152,61 @@ class BlueskyPlatform(Platform):
             raise PlatformAPIError(f"Bluesky API error while posting: {e}") from e
         return {"uri": result.uri, "cid": result.cid}
 
-    def get_post_metrics(self, post_ref: str) -> dict[str, Any]:
-        """`post_ref` is the `uri` returned by publish_post(). Freshly-posted
-        content will usually read 0s — that's a real number, not a bug.
-        """
-        client = self._get_client()
-        try:
-            response = client.get_posts([post_ref])
-        except RateLimitExceededError as e:
-            raise PlatformRateLimitError("Bluesky rate limit hit while fetching post metrics. Wait and retry.") from e
-        except NetworkError as e:
-            raise PlatformAPIError(f"Network error reaching Bluesky: {e}") from e
-        except AtProtocolError as e:
-            raise PlatformAPIError(f"Bluesky API error while fetching post metrics: {e}") from e
-        if not response.posts:
-            raise PlatformAPIError(f"Post not found (may still be indexing): {post_ref}")
-        post = response.posts[0]
+    # app.bsky.feed.getPosts caps at 25 URIs per call.
+    _GET_POSTS_MAX_URIS = 25
+
+    def _reading(self, post_ref: str, post: Any) -> dict[str, Any]:
         return {
             "source": "bluesky",
             "uri": post_ref,
             "like_count": post.like_count or 0,
             "repost_count": post.repost_count or 0,
             "reply_count": post.reply_count or 0,
+            # 2026-09-20: verified live against this account — getPosts
+            # returns real integers for both, not None, so no extra
+            # endpoint is needed. bookmark_count is a weight-3 signal
+            # (see scoring.py); quote_count is captured but deliberately
+            # never scored, because a quote can be a dunk.
+            "bookmark_count": post.bookmark_count or 0,
+            "quote_count": post.quote_count or 0,
         }
+
+    def _get_posts(self, uris: list[str]):
+        client = self._get_client()
+        try:
+            return client.get_posts(uris).posts
+        except RateLimitExceededError as e:
+            raise PlatformRateLimitError("Bluesky rate limit hit while fetching post metrics. Wait and retry.") from e
+        except NetworkError as e:
+            raise PlatformAPIError(f"Network error reaching Bluesky: {e}") from e
+        except AtProtocolError as e:
+            raise PlatformAPIError(f"Bluesky API error while fetching post metrics: {e}") from e
+
+    def get_post_metrics(self, post_ref: str) -> dict[str, Any]:
+        """`post_ref` is the `uri` returned by publish_post(). Freshly-posted
+        content will usually read 0s — that's a real number, not a bug.
+        """
+        posts = self._get_posts([post_ref])
+        if not posts:
+            # getPosts returns 200 with an empty list for a URI that is
+            # gone — the same shape it would give a post still indexing,
+            # which is why this used to be reported as "may still be
+            # indexing". In practice nothing here is ever polled sooner
+            # than 24h after publish (tracking_review.CHECKPOINT_MIN_AGE),
+            # so at that age an empty result means deleted, not pending.
+            raise PostNotFoundError(
+                f"Bluesky returned no post for {post_ref} — it was almost certainly deleted."
+            )
+        return self._reading(post_ref, posts[0])
+
+    def get_post_metrics_batch(self, post_refs: list[str]) -> dict[str, dict[str, Any]]:
+        """One getPosts call per 25 URIs instead of one per post. Deleted
+        posts are simply missing from the response, which is exactly the
+        "absent means gone" contract the base class documents.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(post_refs), self._GET_POSTS_MAX_URIS):
+            chunk = post_refs[start:start + self._GET_POSTS_MAX_URIS]
+            for post in self._get_posts(chunk):
+                out[post.uri] = self._reading(post.uri, post)
+        return out

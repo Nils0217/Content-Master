@@ -12,8 +12,10 @@ select
     channel,
     recorded_at::timestamp as recorded_at,
     source,
-    impressions,
-    clicks,
-    conversions,
-    ctr
+    like_count,
+    repost_count,
+    reply_count,
+    bookmark_count,
+    quote_count,
+    engagement_score
 from read_json_auto('../metrics/post_metrics.jsonl', format = 'newline_delimited', union_by_name = true)

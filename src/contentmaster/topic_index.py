@@ -32,7 +32,7 @@ from .config import settings
 from .human_loop import ReviewInterrupted
 from .slug import slugify
 
-PLAYS_DIR = settings.project_root / "plays"
+PLAYS_DIR = settings.data_root / "plays"
 # 2026-09-17 (code scan): topic index files used to live directly in
 # plays/ as {product}_topics.json — collided with warehouse/models/
 # staging/stg_plays.sql's `plays/*.json` glob (different schema, DuckDB's
@@ -283,7 +283,7 @@ def save_target(product_name: str, region: str | None = None, audience: str | No
 
 def record_topic_used(product_name: str, topic_name: str) -> None:
     """Called once a post actually gets published (not at draft-write
-    time, and not gated on the later checkpoint's ctr verdict — a
+    time, and not gated on the later checkpoint's engagement verdict — a
     rejected draft never reaches this call; "published" is the bar, per
     the 2026-09-15 design decision)."""
     index = load_index(product_name)

@@ -26,14 +26,14 @@ which had the same blocking-input() problem. Each due post's metrics pull
 + analysis + recommendation runs eagerly, then either confirms right in
 the terminal (--terminal) or gets queued (plays/_analysis_review.jsonl)
 and shown in the same browser page's Analysis review tab, with
-Modiqo's capture (success/failure, decided by the real ctr threshold,
+Modiqo's capture (success/failure, decided by scoring.py's gates,
 independent of the human's confirm/disagree choice) deferred until that
 decision actually happens — see apply_analysis_decision().
 
 2026-09-15 (docs/SCHEDULE.md Phase 9, docs/LOG.md — /grill-me design
 session): publish used to be immediately followed by a metrics pull and a
 full analyze+discuss+capture cycle, seconds after the post went live —
-that's noise, not signal (a real example: impressions=1, ctr=0.0). `run()`
+that's noise, not signal (a real example: a post read 0 engagement). `run()`
 now stops at publish + queuing; the analysis half moved to a separate,
 later-triggered step (`run_review()`) that only looks at a post once
 real time — one of 3 checkpoints — has actually passed.
@@ -68,12 +68,20 @@ from .config import CogneeSettings, settings
 from .discuss import synthesize_strategy
 from .draft_generator import DraftGenerator
 from .human_loop import ReviewInterrupted, review_draft, review_image
-from .modiqo_play import capture_failure, capture_success, find_best_prior
-from .platforms.base import PlatformAPIError, PlatformConfigError, PlatformRateLimitError
+from .modiqo_play import capture_failure, capture_success, comparable_history, find_best_prior
+from .platforms.base import (
+    PlatformAPIError,
+    PlatformConfigError,
+    PlatformRateLimitError,
+    PostNotFoundError,
+)
 from .platforms.registry import PLATFORMS, get_platform
+from .product_registry import describe as describe_product, remember as remember_product
+from .publish_failure import PublishFailure, classify as classify_failure
+from .publish_guard import DraftNotPublishable, publish_blockers
+from .scoring import engagement_score, judge
 from .slug import slugify
 
-SUCCESS_CTR_THRESHOLD = 0.5  # engagement score above this counts as a "win" for Modiqo
 
 # Last-resort stand-in for `--features`, used only when generation cannot
 # be grounded in a topic index or the document text. These describe this
@@ -85,21 +93,13 @@ PLACEHOLDER_FEATURES: tuple[str, ...] = (
     "human-in-the-loop safety",
 )
 
-# 2026-09-18 (docs/LOG.md — real design review after the first image post's
-# analysis): the old formula was `likes / max(likes+reposts+replies, 1)`,
-# which actively punished a post for getting *more* positive engagement —
-# a repost or reply grew the denominator without growing the numerator, so
-# the same post scored lower the more people engaged with it beyond a like.
-# Replaced with a weighted average of the three signals, bounded to the
-# same [0, max(weight)] interval regardless of how much total engagement
-# a post gets, so every post's score is comparable on the same scale.
-# Reposts and replies are worth more than a like (they spread the post
-# further / show a real conversation), hence the higher weights below.
-# Still stored under the field name "ctr" everywhere (see metrics_store.py,
-# analysis.py, the warehouse models) — kept as-is for now since the metric
-# may change again before it settles; rename everywhere together, later,
-# not piecemeal.
-ENGAGEMENT_WEIGHTS = {"like": 1.0, "repost": 3.0, "reply": 2.0}
+# 2026-09-20: the engagement score, its weights and the win/lose gates all
+# moved to scoring.py — see that module for what was wrong with the
+# weighted average this replaced, and why every tunable number now lives
+# in one place. `SUCCESS_CTR_THRESHOLD` is gone with it: an absolute
+# threshold cannot work on a sum with no upper bound, and the percentile
+# gate makes a win rare by construction at any account size, so it never
+# needs re-tuning.
 
 
 def _dataset_slug(product_name: str) -> str:
@@ -183,19 +183,30 @@ def step3_generate_drafts(
     See _extract_topics_and_generate() for where it comes from.
     """
     play = find_best_prior(product_name, channel)
-    picked_topics = topic_index.pick_topics({"topics": topics_all}, n)
+    # 2026-09-21: every topic is offered, with its usage count, and the
+    # model chooses. pick_topics() used to decide here — before the model
+    # saw anything — and the choice was then imposed as an absolute
+    # grounding rule, so no amount of prior evidence could ever change what
+    # a post was about. pick_topics() still exists for the least-used
+    # ordering; it is no longer the thing that decides.
+    offered = topic_index.pick_topics({"topics": topics_all}, len(topics_all)) or topics_all
     generator = DraftGenerator()
     audit.log_event("draft_generator", "draft.start", product=product_name, channel=channel,
-                     topics=[t["topic"] for t in picked_topics], improving_on_prior=bool(play),
+                     topics_offered=[t["topic"] for t in offered], improving_on_prior=bool(play),
                      has_context=bool(context.strip()))
     drafts = generator.draft_posts({"name": product_name, "features": features}, channel, n=n,
-                                    topics=picked_topics, prior=play, target=target, context=context)
+                                    topics=offered, prior=play, target=target, context=context)
     # `sources` makes a template-only run visible in audit/events.jsonl.
     # Without it, "draft.done n=1" looked identical whether the LLM wrote
     # the post or the canned string did — which is exactly why the dead
     # context fallback above went unnoticed for so long.
     audit.log_event("draft_generator", "draft.done", n=len(drafts),
-                     sources=sorted({d.get("source", "unknown") for d in drafts}))
+                     sources=sorted({d.get("source", "unknown") for d in drafts}),
+                     topics_chosen=[d.get("topic") for d in drafts],
+                     axes=[d.get("test_axis") for d in drafts if d.get("test_axis")],
+                     went_against_evidence=[d.get("evidence_against") for d in drafts
+                                             if (d.get("evidence_against") or "").lower()
+                                             not in ("", "none")])
     return drafts
 
 
@@ -212,7 +223,8 @@ def step4_human_review(draft: dict[str, Any], product_name: str) -> Any:
     generator = DraftGenerator()
 
     def regenerate_fn(current_text: str, feedback: str) -> str | None:
-        return generator.revise_post(product_name, current_text, feedback, brief=draft.get("brief", ""))
+        return generator.revise_post(product_name, current_text, feedback,
+                                      brief=draft.get("brief", ""), channel=draft.get("channel", ""))
 
     decision = review_draft(draft, regenerate_fn=regenerate_fn)
     audit.log_event("human_loop", "reviewed", draft_id=draft["id"],
@@ -249,6 +261,7 @@ def step4b_generate_image(draft: dict[str, Any], final_text: str) -> tuple[bytes
 
 def step5_publish(
     draft: dict[str, Any], final_text: str, image: bytes | None = None, image_alt: str = "",
+    original_text: str | None = None, acknowledged: bool = False,
 ) -> dict[str, Any]:
     """Posts for real on any *implemented* platform (see
     platforms/registry.py's PLATFORMS) — gated on the human approval that
@@ -265,7 +278,40 @@ def step5_publish(
     `image`/`image_alt` (2026-09-16, Phase 4): optional, already
     human-approved by step4b_generate_image() if present — platforms that
     don't support images yet just ignore them (see platforms/base.py).
+
+    2026-09-20: raises PublishFailed *before* touching a platform
+    when `final_text` does not look like a post at all (see
+    publish_guard.py — a reviewer's instruction typed into an edit box
+    once went out as a live post). The check lives here, at the single
+    point every review surface already funnels through, rather than in
+    any one UI: the previous fix lived in the terminal prompt and the
+    Streamlit UI added three days later simply did not have it.
+    Unlike a platform failure this does NOT degrade to a simulated
+    publish — that is recorded as published, which would file the
+    accident rather than stop it. `acknowledged=True` overrides, for a
+    human who has seen the warning and means it.
     """
+    hard = get_platform(draft["channel"]).constraints.violations(final_text) \
+        if draft.get("channel") in PLATFORMS else []
+    if hard or not acknowledged:
+        # `acknowledged` lets a human insist on an unusual-looking post; it
+        # cannot waive the platform's own rules, which are not a matter of
+        # judgement.
+        blockers = hard if hard else publish_blockers(
+            final_text, original_text or draft.get("text"), channel=draft.get("channel"))
+        if blockers:
+            reason = ("Refusing to publish — this does not look like a post:\n  - "
+                      + "\n  - ".join(blockers))
+            failure = classify_failure(DraftNotPublishable(reason))
+            audit.log_event("publish", "blocked", draft_id=draft.get("id"),
+                             channel=draft.get("channel"), kind=failure.kind,
+                             error_type=failure.error_type, reasons=blockers,
+                             text_length=len(final_text or ""))
+            print(f"[publish blocked: {failure.kind}] {reason}")
+            # Raised as PublishFailed so every surface catches one type,
+            # whether the rejection came from our own pre-flight check or
+            # from the platform itself.
+            raise PublishFailed(failure, draft.get("id", ""))
     channel = draft["channel"]
     if channel in PLATFORMS:
         try:
@@ -276,25 +322,28 @@ def step5_publish(
             audit.log_event("publish", f"{channel}.posted", draft_id=draft["id"], ref=post_ref,
                              has_image=bool(image))
             return published
-        except PlatformConfigError as e:
-            print(f"[warn] {channel} not configured ({e}); falling back to simulated publish.")
-        except PlatformRateLimitError as e:
-            # Listed before PlatformAPIError on purpose — it's a subclass
-            # of it since 2026-09-19 (see platforms/base.py), and unlike a
-            # generic failure this one is worth retrying rather than
-            # treating as "this post is done".
-            print(f"[warn] {channel} rate-limited ({e}); falling back to simulated publish — "
-                  f"the real post did NOT go out, re-run once the limit clears.")
-        except PlatformAPIError as e:
-            # 2026-09-19 (code scan): PlatformAuthError and
-            # PlatformRateLimitError used to be siblings of this class,
-            # not subclasses, so both fell straight through this handler
-            # and crashed the whole run. Fixed in platforms/base.py; this
-            # handler now genuinely covers every runtime publish failure.
-            print(f"[warn] {channel} post failed ({e}); falling back to simulated publish.")
+        except Exception as e:
+            # 2026-09-21: every platform error used to be caught here and
+            # answered with a simulated publish — recorded as published,
+            # queued for measurement, and shown in the browser as
+            # `Published.`. A real failure and an unimplemented platform
+            # became indistinguishable, which is how a 322-character post
+            # was reported as live while never reaching Bluesky at all.
+            # Now the failure is classified, recorded with its full
+            # reason, and raised.
+            failure = classify_failure(e)
+            audit.log_event("publish", "failed", draft_id=draft["id"], channel=channel,
+                             kind=failure.kind, error_type=failure.error_type,
+                             reason=failure.reason, text_length=len(final_text))
+            print(f"[publish failed: {failure.kind}] {failure.explain()}")
+            raise PublishFailed(failure, draft["id"]) from e
 
+    # Only reachable for a channel with no adapter at all. This is the one
+    # remaining meaning of "simulated": the platform was never attempted,
+    # not that it was attempted and failed.
     published = {**draft, "text": final_text, "status": "published (simulated)"}
-    audit.log_event("publish", "simulated", draft_id=draft["id"], channel=channel)
+    audit.log_event("publish", "simulated", draft_id=draft["id"], channel=channel,
+                     note="no adapter for this channel; nothing was sent")
     return published
 
 
@@ -307,11 +356,21 @@ def step6_queue_for_review(product_name: str, channel: str, published: dict[str,
     later, from `contentmaster review` (see run_review() below), once a
     checkpoint's worth of real time has actually passed.
     """
-    tracking_review.queue_for_review(
-        post_id=published["id"], product=product_name, channel=channel,
-        post_ref=published.get("post_ref"), final_text=published["text"],
-        edited=edited, reviewer_note=reviewer_note,
-    )
+    try:
+        tracking_review.queue_for_review(
+            post_id=published["id"], product=product_name, channel=channel,
+            post_ref=published.get("post_ref"), final_text=published["text"],
+            edited=edited, reviewer_note=reviewer_note,
+        )
+    except tracking_review.NotPublishedForReal as e:
+        # A simulated publish (channel with no adapter). Recorded plainly
+        # rather than tracked as if it were online — and, since 2026-09-21,
+        # a *failed* publish never gets here at all: step5_publish raises
+        # instead of degrading, so "simulated" now means only what it says.
+        audit.log_event("tracking_review", "not_tracked", post_id=published["id"],
+                         product=product_name, channel=channel, reason=str(e))
+        print(f"[not tracked] {e}")
+        return
     audit.log_event("tracking_review", "queued", post_id=published["id"],
                      product=product_name, channel=channel)
 
@@ -325,44 +384,113 @@ def step6_queue_for_review(product_name: str, channel: str, published: dict[str,
         audit.log_event("topic_index", "used", product=product_name, topic=topic)
 
 
-def _pull_checkpoint_metrics(post_id: str, channel: str, post_ref: str | None,
-                              checkpoint: str) -> dict[str, Any]:
-    """Real engagement pull for one tracked post at one checkpoint —
-    same shape/fallback logic the old (removed) step6_track_metrics used
-    right after publish, just triggered much later now. Always writes a
-    real row to metrics/post_metrics.jsonl (warehouse/'s dbt project reads
-    it directly — see warehouse/models/staging/stg_post_metrics.sql).
+class PublishFailed(RuntimeError):
+    """A real publish attempt failed. Nothing reached the platform.
+
+    Carries the classification so a caller can tell an environment blip
+    (send the same bytes again later) from a content rejection (needs a
+    revision and another human decision) without re-inspecting the
+    original exception.
     """
+
+    def __init__(self, failure: PublishFailure, draft_id: str):
+        super().__init__(failure.explain())
+        self.failure = failure
+        self.draft_id = draft_id
+
+
+class PostWasDeleted(RuntimeError):
+    """Raised out of _pull_checkpoint_metrics() when the post is gone, so
+    the caller abandons this post instead of analysing invented numbers.
+    """
+
+
+def _reading_from_counts(channel: str, checkpoint: str, real: dict[str, Any]) -> dict[str, Any]:
+    """The one place raw platform counts become a metrics row, shared by
+    the checkpoint pull and `contentmaster refresh` so the two can never
+    drift into writing differently-shaped rows for the same post.
+    """
+    raw = {k: real.get(k) or 0 for k in
+           ("like_count", "repost_count", "reply_count", "bookmark_count", "quote_count")}
+    return {
+        "source": f"{channel} (live, {checkpoint})",
+        "checkpoint": checkpoint,
+        # 2026-09-21: `ctr`, `impressions`, `clicks` and `conversions` are
+        # gone. They were hotdata.dev-era ad-tech names holding social
+        # numbers: `clicks` was the like count, `conversions` the repost
+        # count, and `impressions` was `max(total_engagement, 1)` — a
+        # figure with no relationship to reach at all, since Bluesky
+        # exposes no impressions. Keeping them meant the same number was
+        # stored twice under two names once raw counts landed, which is a
+        # standing invitation to update one and not the other. `ctr` in
+        # particular read as a rate: the value 1.0 meant "1 point", not
+        # "100%".
+        "engagement_score": round(engagement_score(raw), 4),
+        # Raw counts always, alongside the derived score: none of the
+        # weights or gate constants can be honestly calibrated yet, so
+        # history has to stay re-runnable against new ones (scoring.py).
+        **raw,
+    }
+
+
+class MetricsUnavailable(RuntimeError):
+    """A real reading could not be taken this run — network, rate limit,
+    or the platform is not configured.
+
+    Nothing is written and the checkpoint is NOT marked done, so the post
+    stays due and the next run tries again. This used to be answered with
+    metrics_store.mock_metrics() (now deleted): invented numbers, written
+    in exactly the shape of a real reading. "Could not measure" and
+    "measured zero" are completely different facts, and a baseline built
+    from a mixture of the two is not a baseline.
+    """
+
+
+def _pull_checkpoint_metrics(entry: dict[str, Any], checkpoint: str) -> dict[str, Any]:
+    """Real engagement pull for one tracked post at one checkpoint. Writes
+    a row to metrics/post_metrics.jsonl only when a real reading was
+    actually taken (warehouse/'s dbt project reads that file directly —
+    see warehouse/models/staging/stg_post_metrics.sql).
+
+    Raises PostWasDeleted if the platform says the post is gone, and
+    MetricsUnavailable if it could not be reached at all. Neither writes
+    anything: there is no longer any path in this codebase that invents a
+    number to keep a row shape happy.
+    """
+    post_id, channel, post_ref = entry["post_id"], entry["channel"], entry.get("post_ref")
     reading = None
     if post_ref and channel in PLATFORMS:
         try:
             platform = get_platform(channel)
             real = platform.get_post_metrics(post_ref)
-            total = real["like_count"] + real["repost_count"] + real["reply_count"]
-            weighted = (
-                ENGAGEMENT_WEIGHTS["like"] * real["like_count"]
-                + ENGAGEMENT_WEIGHTS["repost"] * real["repost_count"]
-                + ENGAGEMENT_WEIGHTS["reply"] * real["reply_count"]
-            )
-            reading = {
-                "source": f"{channel} (live, {checkpoint})",
-                "impressions": max(total, 1),  # not every platform exposes impressions; approximated from engagement
-                "clicks": real["like_count"],
-                "conversions": real["repost_count"],
-                "ctr": round(weighted / max(total, 1), 4),  # weighted engagement score, see ENGAGEMENT_WEIGHTS above
-            }
+            reading = _reading_from_counts(channel, checkpoint, real)
             audit.log_event(channel, "metrics.pulled", checkpoint=checkpoint, **real)
+        except PostNotFoundError as e:
+            # Listed before PlatformAPIError on purpose — it is a subclass,
+            # so the generic handler below would otherwise swallow it.
+            tracking_review.mark_deleted(entry, detail=str(e))
+            audit.log_event(channel, "post.deleted", post_id=post_id, checkpoint=checkpoint,
+                             post_ref=post_ref, detected_by=f"{checkpoint} checkpoint")
+            print(f"[deleted] {post_ref} no longer exists on {channel} — recorded as deleted, "
+                  "no metrics written. It will not be polled or reviewed again.")
+            raise PostWasDeleted(post_ref or post_id) from e
         except (PlatformConfigError, PlatformAPIError) as e:
-            # 2026-09-19 (code scan): used to catch PlatformAPIError only,
-            # which missed both get_platform()'s PlatformConfigError and
-            # (before base.py's hierarchy fix) auth/rate-limit failures —
-            # any of them crashed `contentmaster review` outright instead
-            # of falling back to a clearly-labeled simulated reading.
-            print(f"[warn] Could not pull {channel} metrics for the {checkpoint} checkpoint "
-                  f"({e}); falling back to simulated reading.")
+            audit.log_event("metrics", "unavailable", post_id=post_id, channel=channel,
+                             checkpoint=checkpoint, error_type=type(e).__name__, reason=str(e))
+            print(f"[skipped] Could not read {channel} metrics for {post_id} at the {checkpoint} "
+                  f"checkpoint ({e}). Nothing written; the checkpoint stays due and the next "
+                  "run will try again.")
+            raise MetricsUnavailable(str(e)) from e
 
     if reading is None:
-        reading = metrics_store.mock_metrics(post_id)
+        # No post_ref, or the channel has no adapter — this post is not
+        # something that can be measured, and tracking_review should never
+        # have accepted it (see queue_for_review's published_for_real gate).
+        audit.log_event("metrics", "unmeasurable", post_id=post_id, channel=channel,
+                         checkpoint=checkpoint, post_ref=post_ref)
+        raise MetricsUnavailable(
+            f"{post_id} has no usable post reference on {channel} — it cannot be measured."
+        )
     metrics_store.write_metrics(post_id, channel, reading)
     metrics = metrics_store.get_metrics(post_id)
     audit.log_event("metrics", "recorded", post_id=post_id, checkpoint=checkpoint, metrics=metrics)
@@ -381,8 +509,9 @@ def _pull_and_analyze(entry: dict[str, Any], checkpoint: str) -> tuple[dict[str,
     what happens with the result once a human has actually looked at it.
     """
     product_name, channel = entry["product"], entry["channel"]
-    metrics = _pull_checkpoint_metrics(entry["post_id"], channel, entry.get("post_ref"), checkpoint)
-    analysis = analyze_performance(product_name, channel, metrics.get("ctr", 0.0), checkpoint=checkpoint)
+    metrics = _pull_checkpoint_metrics(entry, checkpoint)
+    analysis = analyze_performance(product_name, channel, metrics.get("engagement_score", 0.0),
+                                    checkpoint=checkpoint)
     next_strategy = synthesize_strategy(product_name, channel, analysis, target=topic_index.load_target(product_name))
     return metrics, analysis, next_strategy
 
@@ -393,7 +522,7 @@ def _finalize_analysis(entry: dict[str, Any], checkpoint: str, metrics: dict[str
     right after its own confirm_with_human() call) and
     apply_analysis_decision() (called from Streamlit once the human
     clicks Confirm/Disagree). Whether this counts as a Modiqo success or
-    failure is decided by the real ctr threshold alone, same as before
+    failure is decided by scoring.judge()'s gates alone, same as before
     this split — the human's confirm/disagree choice only ever affects
     `analysis.human_confirmed`/`human_note` (stored either way, see
     analysis.confirm_with_human()'s own docstring), never which of
@@ -407,19 +536,37 @@ def _finalize_analysis(entry: dict[str, Any], checkpoint: str, metrics: dict[str
                      checkpoint=checkpoint, trend=analysis.trend,
                      n_prior_posts=analysis.n_prior_posts, human_confirmed=analysis.human_confirmed)
 
-    if metrics.get("ctr", 0) >= SUCCESS_CTR_THRESHOLD:
+    # 2026-09-20: replaces `ctr >= SUCCESS_CTR_THRESHOLD`. The verdict is
+    # now one of five states from scoring.judge() against a real baseline
+    # of comparable posts, not a single absolute number — see scoring.py.
+    verdict = judge(metrics, comparable_history(channel, checkpoint,
+                                                 exclude_post_ids={entry.get("post_id")}))
+    print(f"[{verdict.state}] {verdict.reason}")
+    audit.log_event("modiqo", "judged", product=product_name, channel=channel,
+                     checkpoint=checkpoint, state=verdict.state, score=verdict.score,
+                     baseline_n=verdict.baseline_n, baseline_p75=verdict.baseline_p75)
+
+    if verdict.is_win:
+        # Only a win reaches capture_success, which is also what fixes the
+        # old winning_text overwrite: every checkpoint used to land here
+        # whenever it cleared the absolute threshold, so a worse post
+        # routinely overwrote the best-known one. `below_baseline` and
+        # `likes_only` now cannot reach it at all.
         play = capture_success(product_name, channel, final_text, metrics, reviewer_note,
                                 improvement_note=next_strategy, analysis=analysis.as_dict(),
                                 checkpoint=checkpoint)
         audit.log_event("modiqo", "success.captured", product=product_name, channel=channel,
-                         checkpoint=checkpoint, runs=play["runs"])
+                         checkpoint=checkpoint, runs=play["runs"], state=verdict.state)
     else:
-        reason = f"ctr {metrics.get('ctr')} below threshold {SUCCESS_CTR_THRESHOLD} at {checkpoint} checkpoint"
+        # Still recorded, with the state named: a `hypothesis` row is not
+        # a failure, it is "there was nothing to compare against", and
+        # that distinction is the whole point of gate 1.
+        reason = f"{verdict.state} at {checkpoint} checkpoint — {verdict.reason}"
         capture_failure(product_name, channel, final_text, reason,
                          improvement_note=next_strategy, analysis=analysis.as_dict(),
                          checkpoint=checkpoint, metrics=metrics)
         audit.log_event("modiqo", "failure.captured", product=product_name, channel=channel,
-                         checkpoint=checkpoint, reason=reason)
+                         checkpoint=checkpoint, reason=reason, state=verdict.state)
 
     tracking_review.mark_checkpoint_done(entry, checkpoint)
 
@@ -470,6 +617,73 @@ def apply_analysis_decision(queue_entry: dict[str, Any], confirmed: bool, note: 
     )
 
 
+def refresh_metrics() -> int:
+    """`contentmaster refresh` — re-reads engagement for every tracked post
+    under 30 days old and appends the new reading to
+    metrics/post_metrics.jsonl.
+
+    Why this exists as its own command (2026-09-19): metrics were only
+    ever pulled inside a checkpoint pass, and a checkpoint runs once per
+    post per tier — `tracking_review.find_due()` skips anything already in
+    checkpoints_done. So a post was measured at 24h and then never looked
+    at again, permanently. That is not a timing bug (the real pulls landed
+    24.7-50.9h after publish, which is correct); it is that nothing ever
+    took a second reading. On a low-reach account, likes arrive from the
+    discover feed days later, so the frozen number was systematically
+    low — 1 like recorded where the account had 6 (docs/ERA0_SNAPSHOT.md).
+
+    Deliberately side-effect free apart from the appended rows: no
+    analysis, no model calls, no human decision, no capture_success /
+    capture_failure, no checkpoints_done change. That is what makes it
+    safe to run as often as you like, and it is the separation that was
+    missing. Posts found to be deleted are marked and dropped from all
+    future polling.
+    """
+    tracked = tracking_review.find_refreshable()
+    if not tracked:
+        print("No tracked posts under 30 days old to refresh.")
+        return 0
+
+    by_channel: dict[str, list[dict[str, Any]]] = {}
+    for entry in tracked:
+        by_channel.setdefault(entry["channel"], []).append(entry)
+
+    n_written = n_deleted = 0
+    for channel, entries in by_channel.items():
+        if channel not in PLATFORMS:
+            continue
+        by_ref = {e["post_ref"]: e for e in entries}
+        try:
+            readings = get_platform(channel).get_post_metrics_batch(list(by_ref))
+        except (PlatformConfigError, PlatformAPIError) as e:
+            # No mock fallback here, unlike the checkpoint pull: a refresh
+            # that cannot reach the platform has nothing to say, and
+            # writing invented numbers is the exact failure this command
+            # was built to stop.
+            print(f"[warn] Could not refresh {channel} metrics ({e}); skipped, nothing written.")
+            continue
+        for post_ref, entry in by_ref.items():
+            real = readings.get(post_ref)
+            if real is None:
+                tracking_review.mark_deleted(entry, detail="absent from a batch metrics refresh")
+                audit.log_event(channel, "post.deleted", post_id=entry["post_id"],
+                                 post_ref=post_ref, detected_by="refresh")
+                print(f"[deleted] {entry['product']} / {post_ref} — gone from {channel}, "
+                      "marked deleted and no longer polled.")
+                n_deleted += 1
+                continue
+            reading = _reading_from_counts(channel, "refresh", real)
+            metrics_store.write_metrics(entry["post_id"], channel, reading)
+            audit.log_event(channel, "metrics.refreshed", post_id=entry["post_id"], **real)
+            n_written += 1
+            print(f"  {entry['product']} / {entry['post_id']}: "
+                  f"{real['like_count']} like(s), {real['repost_count']} repost(s), "
+                  f"{real['reply_count']} reply(ies)")
+
+    print(f"\nRefreshed {n_written} post(s); {n_deleted} found deleted.")
+    return 0
+
+
 def run_review(checkpoint: str = "24h", terminal: bool = False) -> int:
     """`contentmaster review` — scans plays/_tracking_review.jsonl for
     posts due at this checkpoint (past CHECKPOINT_MIN_AGE and not already
@@ -498,11 +712,19 @@ def run_review(checkpoint: str = "24h", terminal: bool = False) -> int:
         return 0
     print(f"{len(due)} post(s) due for the {checkpoint} checkpoint.")
     n_queued = 0
+    # 2026-09-21 (real usage bug): counted separately from n_queued, and
+    # the browser now opens for either. Before this, a run where EVERY due
+    # post was already pending left n_queued at 0, so launch_streamlit()
+    # never ran — while the skip message below told the operator to go
+    # open localhost:8501, which nothing had started. The server also
+    # shuts itself down when idle (see streamlit_app.py), so "it was still
+    # up from last time" is not a safe assumption either.
+    n_already_pending = 0
     for entry in due:
         if analysis_queue.find_pending_for(entry["post_id"], checkpoint) is not None:
+            n_already_pending += 1
             print(f"\n--- {entry['product']} / {entry['channel']} ({entry['post_id']}) ---")
-            print("[skip] Already pending a human decision in the browser review queue — "
-                  "open http://localhost:8501 to decide, or check plays/_analysis_review.jsonl.")
+            print("[skip] Already pending a human decision in the browser review queue.")
             continue
         print(f"\n--- {entry['product']} / {entry['channel']} ({entry['post_id']}) ---")
         try:
@@ -511,11 +733,24 @@ def run_review(checkpoint: str = "24h", terminal: bool = False) -> int:
             else:
                 _run_review_streamlit(entry, checkpoint)
                 n_queued += 1
+        except PostWasDeleted:
+            # Already recorded and explained by _pull_checkpoint_metrics();
+            # just move on to the next due post rather than aborting the run.
+            continue
+        except MetricsUnavailable:
+            # Deliberately NOT marked done — the post stays due so the next
+            # run retries it. Already explained on stdout and in audit.
+            continue
         except ReviewInterrupted:
             print("\n[stopped] Review interrupted — remaining due post(s) skipped this run.")
             break
-    if n_queued:
-        print(f"\n{n_queued} post(s)' analysis queued for review.")
+    if n_queued or n_already_pending:
+        parts = []
+        if n_queued:
+            parts.append(f"{n_queued} post(s)' analysis queued for review")
+        if n_already_pending:
+            parts.append(f"{n_already_pending} already waiting from an earlier run")
+        print("\n" + "; ".join(parts) + ".")
         launch_streamlit()
     return 0
 
@@ -609,6 +844,16 @@ def _run_terminal(product_name: str, channel: str, drafts: list[dict[str, Any]])
             published = step5_publish(draft, decision.final_text, image=image, image_alt=image_alt)
             step6_queue_for_review(product_name, channel, published,
                                     edited=decision.edited, reviewer_note=decision.reviewer_note)
+        except PublishFailed as e:
+            # Nothing was sent. Treated as a stop for this draft rather
+            # than a crash: the rest of the batch is still worth
+            # reviewing. Not written to _failures.jsonl — that file is the
+            # "this content underperformed" signal, and a 22-character
+            # overrun is a mechanical error, not a quality verdict.
+            print(f"\n[not published] {e}")
+            results.append({"draft": i, "status": f"failed ({e.failure.kind})",
+                             "text": draft["text"], "channel": channel})
+            continue
         except ReviewInterrupted:
             print(f"\n[stopped] Review interrupted at draft {i} of {len(drafts)} — "
                   f"{len(drafts) - i} remaining draft(s) skipped.")
@@ -634,7 +879,7 @@ def _run_streamlit(product_name: str, channel: str, drafts: list[dict[str, Any]]
     opened automatically. No inline review here at all, unlike the
     terminal path.
     """
-    out_dir = settings.project_root / "generated_images"
+    out_dir = settings.data_root / "generated_images"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for draft in drafts:
@@ -650,6 +895,9 @@ def _run_streamlit(product_name: str, channel: str, drafts: list[dict[str, Any]]
             draft["id"], product_name, channel, draft["text"],
             topic=draft.get("topic", ""), brief=draft.get("brief", ""), image_path=image_path,
             source=draft.get("source", "unknown"),
+            labels={k: draft.get(k) for k in
+                    ("topic_reason", "characteristics", "test_axis", "test_arm",
+                     "evidence_used", "evidence_against") if draft.get(k) is not None},
         )
 
     audit.log_event("pipeline", "run.queued_for_streamlit", n=len(drafts))
@@ -764,6 +1012,20 @@ def run(whitepaper_path: str, channel: str = "x", product_name: str | None = Non
 
     # Step 1 and step 3: same either way, see _extract_topics_and_generate.
     product_name = product_name or Path(whitepaper_path).stem
+
+    # 2026-09-20: say out loud whether this name has been used before.
+    # The name is the key every play file, topic index and history row
+    # hangs off, and it is re-typed by hand every run — four spellings of
+    # the same cat whitepaper split the history four ways and made every
+    # analysis report "no prior posts". Nothing here renames anything;
+    # the name stays a human decision, it is just no longer an invisible
+    # one. See product_registry.py.
+    try:
+        source_hash = topic_index.file_hash(whitepaper_path)
+    except OSError:
+        source_hash = None  # unreadable path is reported properly further down
+    print(f"[product] {describe_product(product_name)}")
+    remember_product(product_name, source_hash=source_hash, whitepaper=whitepaper_path)
     if not features:
         # 2026-09-19 (code scan): these describe THIS PIPELINE, not
         # whatever product is being marketed — they date from when the

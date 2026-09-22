@@ -10,13 +10,13 @@ connection, no CLI, no account needed here.
 from __future__ import annotations
 
 import json
-import random
 from datetime import datetime, timezone
 from typing import Any
 
 from .config import settings
+from .scoring import engagement_score
 
-METRICS_PATH = settings.project_root / "metrics" / "post_metrics.jsonl"
+METRICS_PATH = settings.data_root / "metrics" / "post_metrics.jsonl"
 
 
 def write_metrics(post_id: str, channel: str, metrics: dict[str, Any]) -> None:
@@ -48,21 +48,13 @@ def get_metrics(post_id: str) -> dict[str, Any] | None:
                 latest = record
     return latest
 
-
-def mock_metrics(post_id: str) -> dict[str, Any]:
-    """Clearly-labeled stand-in for live engagement data, used when there's
-    no real published post to pull metrics from (channel has no
-    implemented platform adapter, or the publish fell back to simulated) —
-    also the fallback at checkpoint time (see pipeline._pull_checkpoint_metrics)
-    when a real platform call fails (rate limit, network error, etc.).
-    """
-    impressions = random.randint(400, 4000)
-    clicks = int(impressions * random.uniform(0.01, 0.06))
-    conversions = int(clicks * random.uniform(0.02, 0.15))
-    return {
-        "source": "MOCK — no live post to pull metrics from",
-        "impressions": impressions,
-        "clicks": clicks,
-        "conversions": conversions,
-        "ctr": round(clicks / impressions, 4) if impressions else 0,
-    }
+# 2026-09-21: mock_metrics() deleted. It returned invented engagement
+# numbers whenever a real reading could not be taken — no platform
+# adapter, a simulated publish, or a failed metrics call — and wrote them
+# to metrics/post_metrics.jsonl in exactly the shape a real reading has.
+# Every "fabricated data reached the ledger" incident traced back to it:
+# a post deleted by hand got random likes, and a post that was never
+# published at all would have too. There is no longer any path that
+# invents a number. If a real reading cannot be taken, nothing is
+# written and the checkpoint stays due, so the next run retries it (see
+# pipeline._pull_checkpoint_metrics).

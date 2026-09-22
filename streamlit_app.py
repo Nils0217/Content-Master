@@ -38,6 +38,8 @@ from contentmaster import analysis_queue, draft_queue
 from contentmaster.draft_generator import DraftGenerator
 from contentmaster.modiqo_play import capture_failure
 from contentmaster.pipeline import apply_analysis_decision, step5_publish, step6_queue_for_review
+from contentmaster.pipeline import PublishFailed
+from contentmaster.publish_guard import publish_blockers
 from contentmaster.platforms.registry import get_platform
 
 # 2026-09-19 (real usage feedback, see docs/LOG.md): auto-shut this server
@@ -204,7 +206,35 @@ with tab_drafts:
             if entry.get("image_path") and Path(entry["image_path"]).exists():
                 image_bytes = Path(entry["image_path"]).read_bytes()
             image_alt = (entry.get("brief") or st.session_state[text_key])[:200]
-            published = step5_publish(draft, st.session_state[text_key], image=image_bytes, image_alt=image_alt)
+            try:
+                published = step5_publish(
+                    draft, st.session_state[text_key], image=image_bytes, image_alt=image_alt,
+                    # The text as first generated, kept by the Edit box below
+                    # — publish_guard compares against it to tell a terse
+                    # rewrite from feedback typed into the wrong box.
+                    original_text=entry.get("original_text") or entry["text"],
+                    acknowledged=bool(st.session_state.get(f"ack_short_{draft_id}")),
+                )
+            except PublishFailed as e:
+                # Nothing was sent, and the page must not say otherwise —
+                # showing `Published.` after a failed publish is exactly
+                # how draft-2d62b063 went unnoticed for two days.
+                st.error(f"Not published — {e.failure.explain()}")
+                draft_queue.update_entry(
+                    draft_id, status="publish_failed",
+                    failure_kind=e.failure.kind, failure_reason=e.failure.reason,
+                )
+                if e.failure.retry_unchanged:
+                    st.info("The post itself is fine. Leave it queued and approve it again once "
+                            "the platform is reachable.")
+                elif e.failure.needs_revision:
+                    st.info("Edit the text or use **Send feedback** to have it revised, then "
+                            "approve again.")
+                    # Only an unusual-looking post can be waived; a platform's
+                    # own rule cannot, so this is offered but may not help.
+                    st.checkbox("I have read the above and this really is the post text I want",
+                                key=f"ack_short_{draft_id}")
+                st.stop()
             step6_queue_for_review(
                 entry["product"], entry["channel"], published,
                 # 2026-09-19 (code scan): was `st.session_state[text_key]
@@ -223,7 +253,19 @@ with tab_drafts:
         if col_e.button("Edit"):
             st.session_state[f"show_edit_{draft_id}"] = True
         if st.session_state.get(f"show_edit_{draft_id}"):
-            new_text = st.text_area("Replacement text", value=st.session_state[text_key], key=f"edit_box_{draft_id}")
+            # 2026-09-20: this box used to be labeled just "Replacement
+            # text", with no confirmation — the same ambiguity that once
+            # published a reviewer's note ("add some details") as a live
+            # post. The terminal prompt was fixed for this on 2026-09-15;
+            # this UI, added 2026-09-18, did not inherit it. Wording now
+            # matches, and publish_guard.py backs both up regardless.
+            st.caption("The FULL text of the post, exactly as it should appear. "
+                       "To describe a change instead and have the LLM rewrite it, "
+                       "use **Send feedback**.")
+            new_text = st.text_area("Replacement post text", value=st.session_state[text_key],
+                                     key=f"edit_box_{draft_id}")
+            for problem in publish_blockers(new_text, entry.get("original_text") or entry["text"]):
+                st.warning(problem)
             if st.button("Save edit", key=f"save_edit_{draft_id}"):
                 # 2026-09-19 (code scan): the edit used to live only in
                 # st.session_state, so refreshing the page (which this
@@ -231,7 +273,13 @@ with tab_drafts:
                 # away and showed the original text again. Written back to
                 # the queue now, same as an LLM revision.
                 st.session_state[text_key] = new_text
-                draft_queue.update_entry(draft_id, text=new_text, edited=True)
+                draft_queue.update_entry(
+                    draft_id, text=new_text, edited=True,
+                    # Written once, on the first edit: the text as generated,
+                    # so publish_guard still has something to compare against
+                    # after `text` has been overwritten.
+                    original_text=entry.get("original_text") or entry["text"],
+                )
                 st.session_state[f"show_edit_{draft_id}"] = False
                 st.rerun()
 
@@ -242,7 +290,8 @@ with tab_drafts:
             if st.button("Send to the LLM", key=f"send_feedback_{draft_id}"):
                 with st.spinner("Revising..."):
                     revised = DraftGenerator().revise_post(
-                        entry["product"], st.session_state[text_key], feedback, brief=entry.get("brief", ""),
+                        entry["product"], st.session_state[text_key], feedback,
+                        brief=entry.get("brief", ""), channel=entry["channel"],
                     )
                 if revised:
                     st.session_state[text_key] = revised
@@ -308,9 +357,9 @@ with tab_analysis:
         st.write(tracking_entry.get("final_text", ""))
 
         st.write(f"prior published posts at this tier: {analysis.get('n_prior_posts')}")
-        if analysis.get("historical_avg_ctr") is not None:
-            st.write(f"historical avg ctr: {analysis['historical_avg_ctr']:.4f}")
-        st.write(f"current ctr: {metrics.get('ctr', 0):.4f}")
+        if analysis.get("historical_avg_score") is not None:
+            st.write(f"historical avg score: {analysis['historical_avg_score']:.4f}")
+        st.write(f"current score: {metrics.get('engagement_score', 0):.4f}")
         st.write(f"trend: {analysis.get('trend')}")
         if analysis.get("prior_suggestion"):
             st.write(f"prior suggestion: {analysis['prior_suggestion']!r} — looks "
