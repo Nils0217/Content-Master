@@ -165,7 +165,14 @@ def review_image(
 
     out_dir = settings.data_root / "generated_images"
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{draft_id or 'draft'}.png"
+    # 2026-09-25: named for the real format. Cloudflare's FLUX returns
+    # JPEG, so every file this wrote was a .png containing one — harmless
+    # while the viewer sniffs content, wrong for anything that trusts the
+    # extension. Changed on both review surfaces in the same edit; see
+    # .claude/skills/two-review-surfaces.
+    from .image_generator import image_format
+
+    path = out_dir / f"{draft_id or 'draft'}.{image_format(image_bytes) or 'png'}"
 
     valid = {"a", "s"} | ({"r"} if regenerate_fn else set())
     options = "[a]ttach / [s]kip (text-only)"

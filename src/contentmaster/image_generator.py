@@ -57,9 +57,42 @@ def generate_image(prompt: str, seed: int | None = None) -> bytes | None:
     if not image_b64:
         return None
     try:
-        return base64.b64decode(image_b64)
+        raw = base64.b64decode(image_b64)
     except (ValueError, TypeError):
         return None
+    if not image_format(raw):
+        # 2026-09-25: the bytes were never checked. Whatever came back was
+        # written to disk and handed to the review page, so a truncated
+        # response or an error payload that happened to decode became a
+        # file Streamlit could not open — and one unreadable image takes
+        # down the whole page, not just that draft.
+        print("[warn] The image service returned something that is not an image; "
+              "treating it as a failed generation.")
+        return None
+    return raw
+
+
+# Magic bytes for the formats Bluesky accepts. Cloudflare's FLUX endpoint
+# returns JPEG despite this project having called the result a PNG since
+# 2026-09-16 — harmless while PIL sniffs content rather than trusting the
+# extension, but the filename was lying and anything that does trust it
+# would have been wrong.
+_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpg"),
+    (b"RIFF", "webp"),
+    (b"GIF8", "gif"),
+)
+
+
+def image_format(raw: bytes | None) -> str | None:
+    """The real format of these bytes, or None if they are not an image."""
+    if not raw:
+        return None
+    for magic, ext in _MAGIC:
+        if raw.startswith(magic):
+            return ext
+    return None
 
 # 2026-09-22. What this replaced, twice.
 #
@@ -81,10 +114,10 @@ def generate_image(prompt: str, seed: int | None = None) -> bytes | None:
 # So the model writes the whole prompt now. One call, one complete FLUX
 # prompt, sent as-is. Nothing is concatenated onto it, because the thing
 # being concatenated was the problem.
-_PROMPT_INSTRUCTION = """Write an image prompt for FLUX, an AI photo generator, to illustrate this marketing post.
+_PROMPT_INSTRUCTION = """Write an image prompt for FLUX, an AI photo generator, to illustrate this post.
 
 Post: {post}
-Product: {product}{category_line}
+Subject: {product}{category_line}
 
 Describe one image. What is in it is up to you — style, angle, media element, shot, someone using the product, the product alone, a moment of ordinary life around it, steps of interacting with the product.
 
@@ -92,7 +125,7 @@ Pick whatever genuinely suits THIS post rather than defaulting to a safe shot.
 
 Four rules:
 
-1. The product must be visibly the subject, and must be recognisable as what it actually is. Do not illustrate only a mood or a hazard with the product absent. Use the plain description of the product above rather than its brand name — FLUX does not know the name and will invent something.
+1. The subject must be visible and recognisable as what it actually is. Do not illustrate only a mood or a hazard with the subject absent. Use the plain description above ("What it actually is") rather than the name — FLUX does not know the name and will invent something. If no plain description is given, take the subject from the post itself and do not assume it is a product.
 
 2. FLUX cannot draw ideas. Replace abstract words — independence, safety, wellbeing, comfort, freedom — with something a physical, visible person could see.
 
@@ -201,7 +234,20 @@ def _llm_prompt(post_text: str, product: str = "", category: str = "") -> str | 
     if not post_text.strip():
         return None
     endpoint = os.environ.get("LLM_IMPROVE_ENDPOINT", "http://localhost:11434/v1/chat/completions")
-    model = os.environ.get("LLM_IMPROVE_MODEL", "llama3.2:3b")
+    # Its own setting, not LLM_IMPROVE_MODEL: writing a prompt a diffusion
+    # model can draw is a different job from writing a post, and they
+    # should be swappable independently.
+    #
+    # gemma3:4b chosen 2026-09-25 by generating real images from every
+    # candidate's prompts and looking at them. On the cheap text check it
+    # scored worse than qwen3:4b and qwen2.5:3b — it is the one model that
+    # keeps naming books and writing "Create a cinematic photograph:"
+    # preambles — but it is also the only one that describes a shot: angle,
+    # focal length, what fills the frame, where the light comes from. The
+    # others describe a subject and leave the camera to FLUX.
+    # prompt_violations() and its retries already catch what gemma gets
+    # wrong; nothing catches a flat composition.
+    model = os.environ.get("IMAGE_PROMPT_MODEL", "gemma3:4b")
     try:
         resp = requests.post(
             endpoint,

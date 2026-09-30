@@ -94,8 +94,15 @@ def _enforce_constraints(lines: list[str], channel: str) -> list[str]:
 # parse time for the same reason — a draft that arrives without a test
 # axis is still a usable draft, and validate_group() will say so.
 _BLOCK_SEPARATOR = "---"
-_FIELD_PATTERN = re.compile(r"^(POST|TOPIC|WHY|IS|TESTING|EVIDENCE-USED|EVIDENCE-AGAINST)\s*:\s*(.*)$",
-                            re.IGNORECASE)
+# Leading junk is tolerated before the field name. A real run came back
+# with every line prefixed "-- " — the model borrowing the separator it
+# had been told to put *between* blocks — and the whole reply was
+# discarded, producing zero drafts from a perfectly good answer. Bullets,
+# numbering and stray dashes are how models decorate lists; the field name
+# is the part that matters.
+_FIELD_PATTERN = re.compile(
+    r"^[\s\-*>#\d.)]*(POST|TOPIC|WHY|IS|TESTING|EVIDENCE-USED|EVIDENCE-AGAINST)\s*:\s*(.*)$",
+    re.IGNORECASE)
 
 
 def _parse_blocks(content: str) -> list[dict[str, Any]]:
@@ -235,6 +242,44 @@ def _trending_for_prompt() -> str:
                  "the product, so it cannot be used as a claim.")
     return "\n".join(parts)
 
+def _subject_description(name: str, category: str) -> str:
+    """What this account is writing about, from what Cognee actually
+    extracted rather than from an assumption.
+
+    2026-09-24. The prompt used to open "Here is a product called
+    '<name>'. Write one short marketing post", which asserted two things
+    nobody had checked: that there is a product, and that the job is to
+    sell it. With a whitepaper titled *How to Use a Cat* — a guide to
+    feline behaviour containing no product at all — that produced
+    "Introducing Fluffy Roommate: the ultimate solution for your feline
+    friend" and "Are you tired of your cat's bad behavior? Try Fluffy
+    Roommate!". Both were rejected by the reviewer, the second with the
+    whole diagnosis in five words: *fluffy roomate is the cat*.
+
+    The extraction had it right the entire time. `category` came back as
+    "a domestic cat"; the prompt called it a product anyway, and the
+    prompt won.
+
+    So the category leads, and nothing here says "marketing" or "sell".
+    What the post should do follows from what the source supports: a
+    document describing a thing for sale yields a post that sells, and a
+    guide yields a post that tells you something. That is a property of
+    the document, not a setting.
+    """
+    label = (category or "").strip()
+    if not label:
+        # No confirmed category: say so rather than substituting an
+        # assumption. The name alone is not evidence of what the thing is.
+        return (f"This account posts about '{name}'. The source document below is the only "
+                "thing that establishes what that is — read it before deciding how to write "
+                "about it, and do not assume it is a product for sale.")
+    return (f"SUBJECT: {label}. '{name}' is simply what this account calls it.\n"
+            f"Write about {label} as the source document below describes it. If the document "
+            "describes something being sold, the post can sell it; if it is a guide or an "
+            "explanation, the post should be useful rather than promotional. Do not invent a "
+            "product, a purchase, or a problem-it-solves that the document does not contain.")
+
+
 def _target_instruction(target: dict[str, Any] | None) -> str:
     """2026-09-18 (real design review): a target is opt-in and currently
     only a region/audience string (see topic_index.load_target) — set via
@@ -338,6 +383,7 @@ class DraftGenerator:
         prior: dict[str, Any] | None = None,
         topics: list[dict[str, Any]] | None = None,
         target: dict[str, Any] | None = None,
+        category: str = "",
     ) -> list[dict[str, Any]]:
         """Turns Cognee's extracted product knowledge into N draft posts
         for one channel.
@@ -381,7 +427,8 @@ class DraftGenerator:
         """
         name = product.get("name", "the product")
         if topics:
-            drafts = self._llm_draft_posts_for_topics(name, channel, topics, prior, target, n=n)
+            drafts = self._llm_draft_posts_for_topics(name, channel, topics, prior, target,
+                                                       n=n, category=category)
             if drafts:
                 return drafts
         if context.strip():
@@ -389,30 +436,30 @@ class DraftGenerator:
             if drafts:
                 return drafts
 
-        # Last resort. Reaching here means BOTH the topic index and the
-        # context fallback failed, i.e. there is no grounding material at
-        # all and/or the local LLM is unreachable — not a normal run.
-        print("[warn] No topics and no usable context, or the local LLM did not respond — "
-              "falling back to the fixed template. These drafts are NOT generated; check "
-              "that Cognee and Ollama are up, and that --whitepaper points at a real file.")
-        features = product.get("features", [])
-        drafts = []
-        for i in range(n):
-            feature = features[i % len(features)] if features else "what it does"
-            drafts.append(
-                {
-                    "id": f"draft-{uuid.uuid4().hex[:8]}",
-                    "channel": channel,
-                    "text": f"{name} — {feature}. Built for teams who ship fast. #{channel}",
-                    "status": "draft",
-                    "source": "template",
-                }
-            )
-        return drafts
+        # Reaching here means BOTH the topic index and the context
+        # fallback failed: no grounding material at all, and/or the local
+        # LLM is unreachable. That is not a normal run.
+        #
+        # 2026-09-26: this used to emit a canned draft built from the
+        # product name, one `--features` entry, and a fixed closing line
+        # about shipping fast — or the literal string "what it does" when
+        # no features were given. A real queued draft came out of it
+        # advertising a startup-flavoured benefit for a document about
+        # feline behaviour.
+        #
+        # A template cannot be grounded in a document it never read, so
+        # every claim it makes is invented by construction. Returning
+        # nothing is the honest answer: the run stops and says what is
+        # broken, instead of handing a reviewer something to approve that
+        # was never about their product.
+        print("[error] No topics and no usable context, and the local LLM did not respond — "
+              "nothing can be grounded, so no drafts were written. Check that Cognee and "
+              "Ollama are up and that --whitepaper points at a readable file.")
+        return None
 
     def _llm_draft_posts_for_topics(
         self, name: str, channel: str, topics: list[dict[str, Any]], prior: dict[str, Any] | None = None,
-        target: dict[str, Any] | None = None, n: int | None = None,
+        target: dict[str, Any] | None = None, n: int | None = None, category: str = "",
     ) -> list[dict[str, Any]] | None:
         """Drafts grounded in the whitepaper's extracted topics.
 
@@ -457,12 +504,12 @@ class DraftGenerator:
         )
 
         prompt = (
-            f"You are writing {wanted} short marketing post(s) for {channel} about a product "
-            f"called '{name}'.\n\n"
-            f"AVAILABLE TOPICS, extracted from the product's source document. Choose which to "
-            f"write about — you may use the same topic more than once or leave some unused. "
-            f"The usage counts are there so you can see what has already been covered a lot; "
-            f"they are information, not a rule.\n{topic_lines}\n\n"
+            f"You are writing {wanted} short post(s) for {channel}.\n\n"
+            f"{_subject_description(name, category)}\n\n"
+            f"WHAT THE SOURCE DOCUMENT ACTUALLY SAYS. These are the topics extracted from it. "
+            f"Choose which to write about — you may use the same topic more than once or leave "
+            f"some unused. The usage counts are there so you can see what has already been "
+            f"covered a lot; they are information, not a rule.\n{topic_lines}\n\n"
             "GROUNDING: every factual claim you make must come from the topic you chose. Do not "
             "invent claims. How you frame the post — the opening, the format, whether you ask a "
             "question, whether you reference something topical — is entirely yours.\n"
@@ -499,8 +546,8 @@ class DraftGenerator:
                 "What it does NOT mean: it is never permission to misrepresent the product. Do "
                 "not invert its value, do not describe a problem it solves as something it "
                 "causes, do not write something you would not want a real reader to believe. "
-                "Every post here is still a genuine marketing post for a real product, and "
-                "every claim still has to come from the topic you chose.\n"
+                "Every post here still has to be something you would stand behind, and every "
+                "claim still has to come from the topic you chose.\n"
                 "If the evidence still holds, those posts do worse and it is confirmed; if they "
                 "do not do worse, the evidence has expired and we need to know.\n"
                 "Change ONE thing, not several. A post that changes the tone AND the hashtags "
