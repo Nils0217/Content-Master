@@ -48,7 +48,12 @@ class CogneeClient:
         Falls back to text-extraction + add_raw_texts() for formats Cognee's
         server has no loader for (currently: .rtf).
         """
-        file_path = Path(file_path)
+        from .document import resolve_bundle
+
+        # An .rtfd is a directory; resolve to the .rtf inside before doing
+        # anything else, or the suffix check below sees ".rtfd" and the
+        # upload sees a directory.
+        file_path = resolve_bundle(Path(file_path))
         if file_path.suffix.lower() == ".rtf":
             # 2026-09-19: shares document.read_text() with the local
             # draft-generation fallback rather than keeping a second copy
