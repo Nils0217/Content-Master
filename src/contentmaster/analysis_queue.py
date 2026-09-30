@@ -29,6 +29,16 @@ from typing import Any
 
 from .config import settings
 
+# Bumped whenever a change to analysis.py would make an already-queued
+# verdict wrong. A queued analysis is computed once and stored as finished
+# text, so fixing the analysis does not fix anything already waiting —
+# and apply_analysis_decision() writes that stored verdict straight into
+# history. Version 2 (2026-09-24): evidence-sufficiency gating, and
+# prior-suggestion effectiveness requiring the advice to have been
+# followed. Entries written before it claim conclusions the current logic
+# refuses to draw.
+ANALYSIS_SCHEMA = 2
+
 QUEUE_PATH = settings.data_root / "plays" / "_analysis_review.jsonl"
 
 
@@ -55,6 +65,7 @@ def queue_analysis(
         "post_id": post_id, "checkpoint": checkpoint, "entry": entry,
         "metrics": metrics, "analysis": analysis, "recommendation": recommendation,
         "status": "pending", "human_note": "", "ts": _now_iso(),
+        "analysis_schema": ANALYSIS_SCHEMA,
     }
     with QUEUE_PATH.open("a") as fh:
         fh.write(json.dumps(record, default=str) + "\n")
@@ -83,6 +94,11 @@ def find_pending() -> list[dict[str, Any]]:
     entries = list(_latest_entries().values())
     entries.sort(key=lambda r: r.get("ts", ""))
     return [r for r in entries if r.get("status") == "pending"]
+
+
+def is_stale(entry: dict[str, Any]) -> bool:
+    """Was this queued by a version of the analysis we no longer trust?"""
+    return int(entry.get("analysis_schema") or 0) < ANALYSIS_SCHEMA
 
 
 def find_pending_for(post_id: str, checkpoint: str) -> dict[str, Any] | None:

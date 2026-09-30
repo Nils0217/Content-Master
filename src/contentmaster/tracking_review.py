@@ -96,6 +96,7 @@ class NotPublishedForReal(ValueError):
 def queue_for_review(
     post_id: str, product: str, channel: str, post_ref: str | None,
     final_text: str, edited: bool, reviewer_note: str,
+    labels: dict[str, Any] | None = None,
 ) -> None:
     """Called once, right after a genuinely successful publish. Replaces
     the old immediate metrics-pull/Modiqo-capture calls
@@ -124,6 +125,13 @@ def queue_for_review(
         "checkpoints_done": {},
         # Set by mark_deleted() when the platform reports the post is gone.
         "deleted_at": None,
+        # 2026-09-24: what the drafting model said this post did —
+        # notably `evidence_used`, which is how analysis.py can tell
+        # whether last round's suggestion was actually acted on. Without
+        # it here the chain breaks at publish: the labels lived only in
+        # the draft queue, while the history that analysis reads had no
+        # idea what any post had followed.
+        **(labels or {}),
     }
     with TRACKING_PATH.open("a") as fh:
         fh.write(json.dumps(record, default=str) + "\n")

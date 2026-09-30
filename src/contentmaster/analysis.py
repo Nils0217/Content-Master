@@ -59,6 +59,23 @@ class AnalysisResult:
     # if the warehouse doesn't have it (never blocks the pipeline).
     external_signal: str = ""
     trending_context: str = ""
+    # 2026-09-24: whether there is enough history here to say anything
+    # comparative at all, using the same floor as the win/lose gate
+    # (scoring.MIN_BASELINE_POSTS / MIN_BASELINE_EVENTS). Before this, the
+    # two disagreed in the same printout: the gate correctly said "no
+    # usable baseline" while this module reported a confident
+    # "delta=-1.0000 ... does not support it" computed from one prior
+    # post. The gate had been added *beside* the older analysis rather
+    # than in front of it, so its conclusion never reached the thing
+    # producing trends and recommendations.
+    #
+    # False does NOT mean produce nothing. It means produce a different
+    # kind of thing — a hypothesis to test rather than a verdict on
+    # numbers — which is what docs/SCHEDULE.md Phase 10 specified for a
+    # failed gate 1 all along. Staying silent for the first eight posts
+    # would switch the system off exactly during the period it has to
+    # operate.
+    has_baseline: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +93,7 @@ class AnalysisResult:
             "human_note": self.human_note,
             "external_signal": self.external_signal,
             "trending_context": self.trending_context,
+            "has_baseline": self.has_baseline,
         }
 
 
@@ -85,6 +103,18 @@ def _query_history(product_name: str, channel: str, checkpoint: str) -> list[dic
     readings, never against 7d/30d ones (see CHECKPOINT_QUESTIONS above).
     Returns None if the warehouse hasn't been built yet, so the caller can
     fall back cleanly instead of crashing the pipeline on a missing file.
+
+    The four raw counts are selected so the caller can derive
+    `engagement_events` the same way scoring.judge() does (2026-09-27):
+    this used to select only `engagement_score`, while the caller read a
+    key named `engagement_events` that no row here has ever carried — not
+    in this SELECT, not in performance_history, not in
+    stg_success_history.sql. `.get()` returned None for every row, so the
+    event count summed to 0 forever and `has_baseline` could never become
+    True: `trend` was permanently pinned to "insufficient_for_trend" no
+    matter how much real history accumulated. Deriving it from the counts
+    rather than adding a mart column keeps one definition of an
+    engagement event, in scoring.py, for both the gate and the trend.
     """
     db_path = settings.project_root / "warehouse" / "local.duckdb"
     if not db_path.exists():
@@ -92,10 +122,14 @@ def _query_history(product_name: str, channel: str, checkpoint: str) -> list[dic
     try:
         import duckdb
 
+        from .scoring import engagement_events
+
         con = duckdb.connect(str(db_path), read_only=True)
         try:
             rows = con.execute(
-                "select ts, engagement_score, improvement_note, external_cat_search_interest "
+                "select ts, engagement_score, improvement_note, evidence_used, "
+                "external_cat_search_interest, like_count, repost_count, "
+                "reply_count, bookmark_count "
                 "from performance_history "
                 "where product = ? and channel = ? and status = 'published' "
                 "and checkpoint = ? order by ts",
@@ -104,7 +138,12 @@ def _query_history(product_name: str, channel: str, checkpoint: str) -> list[dic
         finally:
             con.close()
         return [
-            {"ts": r[0], "engagement_score": r[1], "improvement_note": r[2], "external_interest": r[3]}
+            {"ts": r[0], "engagement_score": r[1], "improvement_note": r[2],
+             "evidence_used": r[3], "external_interest": r[4],
+             "engagement_events": engagement_events(
+                 {"like_count": r[5], "repost_count": r[6],
+                  "reply_count": r[7], "bookmark_count": r[8]}
+             )}
             for r in rows
         ]
     except Exception:  # noqa: BLE001 — analysis degrading gracefully beats crashing the pipeline
@@ -179,6 +218,7 @@ def _query_trending_context() -> str:
             region = con.execute(
                 "select country from stg_google_trends_region order by relative_interest desc limit 3"
             ).fetchall()
+            as_of = con.execute("select max(day) from stg_google_trends_timeline").fetchone()
         finally:
             con.close()
     except Exception:  # noqa: BLE001 — this is optional flavor, never worth crashing over
@@ -197,7 +237,84 @@ def _query_trending_context() -> str:
         parts.append("rising related searches: " + ", ".join(rising_bits))
     if region:
         parts.append("highest-interest regions: " + ", ".join(r[0] for r in region))
-    return "Trending context (Google Trends, not specific to this product's own posts): " + "; ".join(parts)
+    # 2026-09-24: the capture date, which the drafting prompt has stated
+    # since the trend rewrite and this side did not. Without it the
+    # advisors read a ten-day-old breakout as a live opportunity, and in a
+    # real session recommended building a post around "cat in the hat
+    # trend" on that basis. The seeds are hand-exported CSV
+    # (warehouse/seeds/); automating the refresh is scheduled, and until
+    # then saying how old the data is lets the reader discount it.
+    captured = str(as_of[0])[:10] if as_of and as_of[0] else "an unknown date"
+    return (f"Trending context (Google Trends, captured {captured}, not specific to this "
+            f"product's own posts — steady searches age well, a breakout does not): "
+            + "; ".join(parts))
+
+
+def summarize_prior_suggestion(text: str, limit: int = 160) -> str:
+    """One line for a suggestion that is really two advisors' full essays.
+
+    Below both review surfaces on purpose. The first version of this lived
+    inside _print_analysis(), so the terminal got a readable line while
+    the Streamlit page — the default surface — kept dumping several
+    hundred words verbatim, twice on the same screen. See
+    .claude/skills/two-review-surfaces.
+    """
+    flat = " ".join((text or "").split())
+    if len(flat) <= limit:
+        return flat
+    return f"{flat[:limit]}... ({len(text)} chars in full)"
+
+
+def describe_effectiveness(effectiveness: str) -> str:
+    """Plain words for `unknown | looks_effective | looks_ineffective`.
+
+    The raw value reads badly next to a label: the terminal printed
+    "looks: looks_ineffective" and Streamlit "— looks unknown". More
+    importantly `unknown` on its own sounds like missing data, when it is
+    a real finding — usually that the advice was never followed, so there
+    is nothing to judge.
+    """
+    return {
+        "unknown": "not assessed — either the post did not say it followed the "
+                   "advice, or there is no baseline to judge against",
+        "looks_effective": "followed, and the score went up",
+        "looks_ineffective": "followed, and the score did not go up",
+    }.get(effectiveness, effectiveness)
+
+
+def _judge_prior_suggestion(suggestion: str, followed: str, current_score: float,
+                            last_score: float, has_baseline: bool) -> str:
+    """Did last round's advice work? Usually the honest answer is that we
+    cannot tell.
+
+    2026-09-24. This used to be `current_score > last_score` and nothing
+    else, which judged whether a suggestion worked purely from what
+    happened afterwards — post hoc ergo propter hoc, written into the
+    codebase. A real case: the suggestion was to write about litter-box
+    hygiene, the post that went out was "Introducing Fluffy Roommate: The
+    Ultimate Companion", and the suggestion was recorded as
+    `looks_ineffective`. It had never been tested. That verdict then went
+    into history, came back in the next prompt, and marked an untried
+    direction as dead.
+
+    Two things now have to hold before a verdict is given at all:
+
+    * the post has to say it followed the advice. `evidence_used` is
+      written by the drafting model for exactly this reason — it records
+      what the draft actually acted on — and until now nothing read it.
+    * there has to be a baseline. One post beating one other post is not
+      evidence that advice worked.
+
+    Either missing gives "unknown", which is not a gap in the data. It is
+    the correct answer.
+    """
+    if not suggestion:
+        return "unknown"
+    if not (followed or "").strip() or followed.strip().lower() in ("none", "n/a", "-"):
+        return "unknown"
+    if not has_baseline:
+        return "unknown"
+    return "looks_effective" if current_score > last_score else "looks_ineffective"
 
 
 def analyze_performance(
@@ -241,11 +358,18 @@ def analyze_performance(
                      "cross-validate against yet.",
         )
     else:
+        from .scoring import MIN_BASELINE_EVENTS, MIN_BASELINE_POSTS
+
         n = len(history)
         avg_score = sum(h["engagement_score"] or 0.0 for h in history) / n
         delta = current_score - avg_score
+        # Same floor the win/lose gate uses, read from the same constants
+        # so the two can never drift into disagreeing about whether there
+        # is anything to compare against.
+        events = sum(int(h.get("engagement_events") or 0) for h in history)
+        has_baseline = n >= MIN_BASELINE_POSTS and events >= MIN_BASELINE_EVENTS
 
-        if n < 2:
+        if not has_baseline:
             trend = "insufficient_for_trend"
         elif avg_score == 0:
             trend = "improving" if current_score > 0 else "flat"
@@ -259,30 +383,48 @@ def analyze_performance(
         last = history[-1]
         prior_suggestion = last.get("improvement_note") or ""
         last_score = last["engagement_score"] or 0.0
-        if not prior_suggestion:
-            effectiveness = "unknown"
-        elif current_score > last_score:
-            effectiveness = "looks_effective"
-        else:
-            effectiveness = "looks_ineffective"
-
-        evidence = (
-            f"[{checkpoint} checkpoint — {question}] "
-            f"{n} prior post(s) at this tier; historical avg score={avg_score:.4f}, "
-            f"current score={current_score:.4f} (delta={delta:+.4f})."
+        effectiveness = _judge_prior_suggestion(
+            prior_suggestion, followed=last.get("evidence_used") or "",
+            current_score=current_score, last_score=last_score, has_baseline=has_baseline,
         )
-        if prior_suggestion:
+
+        if has_baseline:
+            evidence = (
+                f"[{checkpoint} checkpoint — {question}] "
+                f"{n} prior post(s) at this tier carrying {events} engagement event(s); "
+                f"historical avg score={avg_score:.4f}, current score={current_score:.4f} "
+                f"(delta={delta:+.4f})."
+            )
+        else:
+            # Raw numbers only. A delta against one prior post is a
+            # difference, not a trend, and printing it as one is what made
+            # this module contradict the gate in the same breath.
+            evidence = (
+                f"[{checkpoint} checkpoint — {question}] No usable baseline yet: "
+                f"{n} comparable post(s) (need {MIN_BASELINE_POSTS}) carrying {events} "
+                f"engagement event(s) (need {MIN_BASELINE_EVENTS}). This post scored "
+                f"{current_score:.4f}. Nothing is being concluded from that — there is nothing "
+                "to compare it against."
+            )
+        # The full note goes into the record; the on-screen copy is
+        # shortened by _print_analysis.
+        if prior_suggestion and effectiveness != "unknown":
             support = "supports" if effectiveness == "looks_effective" else "does not support"
             evidence += (
-                f" Prior suggestion was {prior_suggestion!r} — score went from {last_score:.4f} to "
-                f"{current_score:.4f} since, which {support} it (single data point, not "
-                f"statistically validated)."
+                f" The previous round's suggestion was acted on, and the score went from "
+                f"{last_score:.4f} to {current_score:.4f}, which {support} it."
+            )
+        elif prior_suggestion:
+            evidence += (
+                " The previous round made a suggestion; whether this post actually followed it "
+                "is not established, so it is not being scored either way."
             )
 
         result = AnalysisResult(
             product=product_name, channel=channel, checkpoint=checkpoint, n_prior_posts=n,
             historical_avg_score=avg_score, current_score=current_score, trend=trend,
             prior_suggestion=prior_suggestion, prior_suggestion_effectiveness=effectiveness,
+            has_baseline=has_baseline,
             evidence=evidence,
         )
 
@@ -315,8 +457,12 @@ def confirm_with_human(result: AnalysisResult, recommendation: str) -> AnalysisR
     print(f"current score          : {result.current_score:.4f}")
     print(f"trend                  : {result.trend}")
     if result.prior_suggestion:
-        print(f"prior suggestion       : {result.prior_suggestion!r}")
-        print(f"looks                  : {result.prior_suggestion_effectiveness}")
+        # Truncated on purpose: the full note is two advisors' complete
+        # text, and printing it here as well as inside `evidence` put the
+        # same several hundred words on screen three times in one report.
+        # The whole thing is still in the record.
+        print(f"prior suggestion       : {summarize_prior_suggestion(result.prior_suggestion)}")
+        print(f"was it followed        : {describe_effectiveness(result.prior_suggestion_effectiveness)}")
     print(result.evidence)
     if result.external_signal:
         print(result.external_signal)

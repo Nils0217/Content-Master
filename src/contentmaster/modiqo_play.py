@@ -78,6 +78,7 @@ def capture_success(
     improvement_note: str = "",
     analysis: dict[str, Any] | None = None,
     checkpoint: str = "24h",
+    evidence_used: str = "",
 ) -> dict[str, Any]:
     """Persist the winning (product, channel) -> text pattern, bumping a run counter.
 
@@ -115,7 +116,8 @@ def capture_success(
     )
     path.write_text(json.dumps(play, indent=2, default=str))
     _append_history(product_name, channel, winning_text, metrics, reviewer_note, improvement_note,
-                     analysis, play["runs"], checkpoint, outcome="success")
+                     analysis, play["runs"], checkpoint, outcome="success",
+                     evidence_used=evidence_used)
 
     _register_with_rote(product_name, channel, metrics)
     return play
@@ -132,6 +134,7 @@ def _append_history(
     run_number: int,
     checkpoint: str,
     outcome: str,
+    evidence_used: str = "",
 ) -> None:
     """Append-only — never overwritten, unlike plays/*.json. This is what
     makes real cross-run analysis possible at all. One row per
@@ -163,6 +166,11 @@ def _append_history(
         "run_number": run_number,
         "checkpoint": checkpoint,
         "outcome": outcome,
+        # 2026-09-24: what this post said it acted on. analysis.py needs it
+        # to answer "was last round's suggestion actually followed?" — a
+        # question it previously did not ask, and so answered wrongly by
+        # assuming the answer was always yes.
+        "evidence_used": evidence_used,
     }
     with HISTORY_PATH.open("a") as fh:
         fh.write(json.dumps(record, default=str) + "\n")
@@ -279,6 +287,7 @@ def capture_failure(
     analysis: dict[str, Any] | None = None,
     checkpoint: str | None = None,
     metrics: dict[str, Any] | None = None,
+    evidence_used: str = "",
 ) -> None:
     """Failed / rejected runs are logged separately as improvement samples
     (white paper §3, step 7) rather than polluting the muscle-memory file.
@@ -314,7 +323,8 @@ def capture_failure(
 
     if checkpoint:
         _append_history(product_name, channel, text, metrics or {}, "", improvement_note,
-                         analysis, 0, checkpoint, outcome="failure")
+                         analysis, 0, checkpoint, outcome="failure",
+                         evidence_used=evidence_used)
 
 
 def _register_with_rote(product_name: str, channel: str, metrics: dict[str, Any]) -> None:

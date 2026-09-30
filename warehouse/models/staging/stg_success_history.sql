@@ -34,6 +34,7 @@ select
     metrics.engagement_score as engagement_score,
     reviewer_note,
     improvement_note,
+    evidence_used,
     run_number,
     checkpoint,
     outcome
@@ -45,7 +46,7 @@ from read_json(
         product: 'VARCHAR',
         channel: 'VARCHAR',
         winning_text: 'VARCHAR',
-        metrics: 'STRUCT(like_count BIGINT, repost_count BIGINT, reply_count BIGINT, bookmark_count BIGINT, quote_count BIGINT, engagement_score DOUBLE)',
+        evidence_used: 'VARCHAR', metrics: 'STRUCT(like_count BIGINT, repost_count BIGINT, reply_count BIGINT, bookmark_count BIGINT, quote_count BIGINT, engagement_score DOUBLE)',
         reviewer_note: 'VARCHAR',
         improvement_note: 'VARCHAR',
         run_number: 'BIGINT',

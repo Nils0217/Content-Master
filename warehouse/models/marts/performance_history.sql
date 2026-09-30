@@ -25,6 +25,7 @@ with history as (
         engagement_score,
         reviewer_note,
         improvement_note,
+        evidence_used,
         run_number,
         checkpoint
     from {{ ref('stg_success_history') }}
@@ -46,6 +47,7 @@ with history as (
         null as engagement_score,
         reason as reviewer_note,
         improvement_note,
+        cast(null as varchar) as evidence_used,
         null as run_number,
         checkpoint
     from {{ ref('stg_failures') }}
