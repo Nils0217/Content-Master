@@ -49,6 +49,8 @@ Review:   contentmaster review
 """
 from __future__ import annotations
 
+import os
+import requests
 from pathlib import Path
 from typing import Any
 
@@ -84,15 +86,17 @@ from .scoring import engagement_score, judge
 from .slug import slugify
 
 
-# Last-resort stand-in for `--features`, used only when generation cannot
-# be grounded in a topic index or the document text. These describe this
-# pipeline itself (they are left over from when the demo whitepaper WAS
-# this project), so they are wrong for any real product — see run().
-PLACEHOLDER_FEATURES: tuple[str, ...] = (
-    "compound memory",
-    "muscle-memory replay",
-    "human-in-the-loop safety",
-)
+# `--features` used to fall back to a hardcoded list — "compound memory",
+# "muscle-memory replay", "human-in-the-loop safety" — which describes
+# THIS PIPELINE. They date from the hackathon, when the document being
+# processed was this project's own whitepaper, and they were reaching the
+# prompt for a cat care guide as "Known features of 'Fluffy roommate'".
+#
+# Deleted rather than replaced. Not knowing a product's features is not a
+# reason to invent some: the source document is the grounding, and if it
+# does not describe features then the post should not claim any. This is
+# the same failure as the prompt asserting "here is a product called X" —
+# a guess presented to the model as a fact.
 
 # 2026-09-20: the engagement score, its weights and the win/lose gates all
 # moved to scoring.py — see that module for what was wrong with the
@@ -103,12 +107,62 @@ PLACEHOLDER_FEATURES: tuple[str, ...] = (
 # needs re-tuning.
 
 
-def _dataset_slug(product_name: str) -> str:
-    """Each product gets its own Cognee dataset so runs for different
-    products/whitepapers never cross-contaminate each other's knowledge
-    graph — search() only ever sees what was ingested for *this* product.
+# Cognee is not used for topic extraction (see _extract below for why).
+# Set COGNEE_ENABLED=1 to put it back in that path.
+COGNEE_ENABLED = os.environ.get("COGNEE_ENABLED", "0") == "1"
+
+# The one wording of the category question, shared by the Cognee path and
+# the local-document path. A module constant rather than a string in each
+# branch because _category_from_local_text()'s whole design note is that it
+# must ask the SAME question — two copies is how they drift into meaning
+# different things while both looking correct.
+#
+# 2026-09-26: "what kind of real-world thing is this document about?" has
+# two honest answers — the subject, and the document. Asked that way one
+# model said "a domestic cat" and another "Cat care manual", and the second
+# would have had the image generator drawing a book. Asking what to point a
+# camera at has only one answer.
+_CATEGORY_QUESTION = (
+    "If you had to photograph ONE physical thing to illustrate this document, what "
+    "would be in the picture? Answer with a short noun phrase of five words or fewer "
+    "naming that thing — for example 'a domestic cat', 'an automatic pet feeder', "
+    "'a folding fabric playpen'. Name the subject itself, never the document, book, "
+    "guide or manual describing it. No brand names, no explanation, no sentence."
+)
+
+# Used when a document sits at the project root and so has no folder of
+# its own to be grouped by.
+COGNEE_DEFAULT_DATASET = "contentmaster"
+
+
+def dataset_for(whitepaper_path: str | Path) -> str:
+    """Which Cognee dataset a document belongs to: its own folder.
+
+    2026-09-26. This was `slugify(product_name)` — one graph per product,
+    so products could not contaminate each other. But the product name is
+    retyped by hand on every run, so what it actually produced was a new
+    graph for every spelling anyone had ever used. Ten had accumulated:
+    `hairy-furry-cut-little-monster` beside
+    `hairy-furry-cute-little-monster`, `fluffy-roomate` beside
+    `fluffy-roommate`, plus `rename-test` and `automarketer` from old
+    experiments. Nothing deleted any of them, and a typo quietly started
+    an empty graph that then answered questions as though it had read the
+    document.
+
+    The folder is the right key because it is a thing that already exists
+    and that nobody retypes. `Demo-white paper/cat.rtfd` belongs to
+    `demo-white-paper`; putting a different product's document in a
+    different folder separates them with no naming step at all, and a
+    typo is impossible because the path either exists or the run fails.
+    Renaming the folder does start a new dataset — but that is a
+    deliberate act, unlike mistyping a product name.
     """
-    return slugify(product_name, default="contentmaster")
+    parent = Path(whitepaper_path).expanduser().resolve().parent
+    # A document at the project root has no meaningful folder of its own;
+    # the repo directory is not a grouping.
+    if parent == settings.project_root or not parent.name:
+        return COGNEE_DEFAULT_DATASET
+    return slugify(parent.name, default=COGNEE_DEFAULT_DATASET)
 
 
 def step1_cognee_extract_topics(whitepaper_path: str, product_name: str) -> list[dict[str, Any]]:
@@ -127,8 +181,61 @@ def step1_cognee_extract_topics(whitepaper_path: str, product_name: str) -> list
     untouched, zero Cognee calls. Returns the full topic list — step3
     picks which ones to actually write about.
     """
+    # Filled in by _extract() when it runs, empty when a cached index makes it
+    # unnecessary. sync_topics reads it through skipped_fn.
+    skipped_lines: list[dict[str, str]] = []
+
     def _extract() -> str:
-        cognee = CogneeClient(CogneeSettings(dataset=_dataset_slug(product_name)))
+        if not COGNEE_ENABLED:
+            # 2026-09-26: Cognee is off for topic extraction. It reads the
+            # document fine; the problem is what it gives back. Its search
+            # ends in an LLM writing a narrative answer, so asked to list
+            # topics it returns a summary of roughly constant length
+            # however long the input is — 22,000 characters of whitepaper
+            # came back as 1,776, with eleven distinct sections flattened
+            # into six categories broad enough to cover anything, and the
+            # reply truncated mid-sentence. Asked instead for the
+            # document's own section headings, it answered that it is
+            # "organized into various chunks": it does not keep the
+            # document's structure, so there were no headings to give.
+            #
+            # The headings are literal text in the file, and reading them
+            # there takes pandoc and a regular expression (see
+            # document.headings_for). Nothing is lost by not asking.
+            #
+            # Cognee is kept, not deleted, because the thing it is
+            # actually for has not happened yet: a graph over many
+            # documents, posts, results and human notes accumulated over
+            # time, where "what has worked before for this kind of claim"
+            # is a real retrieval question. One document is not that.
+            audit.log_event("cognee", "skipped", reason="COGNEE_ENABLED=0")
+            from .document import headings_and_skipped_for, pandoc_available
+
+            headings, skipped = headings_and_skipped_for(whitepaper_path)
+            # Handed to sync_topics so the human can put back anything the
+            # extractor turned down. Stashed rather than re-read: recomputing
+            # would run pandoc a second time for the same answer.
+            skipped_lines.clear()
+            skipped_lines.extend(skipped)
+            audit.log_event("document", "headings.skipped", file=whitepaper_path,
+                             n=len(skipped))
+            audit.log_event("document", "headings.extracted", file=whitepaper_path,
+                             n=len(headings), pandoc=pandoc_available())
+            if not pandoc_available():
+                # Said out loud rather than logged only: the difference is
+                # 19 sections against 7 on the project's own whitepaper,
+                # and a quietly smaller topic pool looks like a document
+                # problem rather than a missing binary.
+                print("[warn] pandoc is not installed, so only numbered headings can be found "
+                      "(subsections marked with bold text are invisible without it). "
+                      "Install it with `brew install pandoc`.")
+            if not headings:
+                print("[warn] No section headings found in this document. Generation will "
+                      "fall back to the document text.")
+            # Handed back in the format the parser expects, so the review
+            # and merge path downstream is unchanged.
+            return "\n".join(f"Topic: {h['topic']} | Brief: {h['brief']}" for h in headings)
+        cognee = CogneeClient(CogneeSettings(dataset=dataset_for(whitepaper_path)))
         audit.log_event("cognee", "add.start", file=whitepaper_path)
         cognee.add_document(whitepaper_path, labels="whitepaper")
         audit.log_event("cognee", "add.done")
@@ -137,10 +244,21 @@ def step1_cognee_extract_topics(whitepaper_path: str, product_name: str) -> list
         cognee.cognify()
         audit.log_event("cognee", "cognify.done")
 
+        # 2026-09-26: asks for the document's own section headings, not
+        # for "topics". "Topics" is an interpretation, and the extractor
+        # answered it by interpreting — returning broad categories it had
+        # inferred (Cat Care, Cat Health) and, at the end of its reply, a
+        # list of advice ("Provide Adequate Stimulation", "Socialize Your
+        # Cat") that are not subjects at all. Headings are text that
+        # exists in the document, so there is nothing to infer and nothing
+        # to invent, and they are the divisions the author already chose.
         query = (
-            "List the distinct topics, features, benefits, or claims described in this "
-            "document. For each one, respond on its own line in exactly this format: "
-            "Topic: <short name> | Brief: <one or two sentence summary>."
+            "List the section headings of this document, copied exactly as they appear in it. "
+            "One heading per line, in this format:\n"
+            "Topic: <the heading> | Brief: <one sentence from that section>\n"
+            "Only headings that are actually in the document. Do not invent headings, do not "
+            "summarise the document, do not add advice or recommendations of your own, and do "
+            "not include a heading for the document as a whole."
         )
         audit.log_event("cognee", "search.start", query="topic list")
         result = cognee.search(query)
@@ -159,26 +277,89 @@ def step1_cognee_extract_topics(whitepaper_path: str, product_name: str) -> list
         `Topic: ... | Brief: ...`, and folding a different question into
         it would put a non-conforming line into that parser.
         """
-        cognee = CogneeClient(CogneeSettings(dataset=_dataset_slug(product_name)))
-        query = (
-            "In five words or fewer, what kind of real-world thing is this document about? "
-            "Answer with a concrete noun phrase naming the object or subject, the way you "
-            "would describe it to someone drawing a picture of it — for example "
-            "'a domestic cat', 'an automatic pet feeder', 'a folding fabric playpen'. "
-            "No brand names, no adjectives about quality, no explanation."
-        )
-        audit.log_event("cognee", "search.start", query="product category")
-        result = cognee.search(query)
-        audit.log_event("cognee", "search.done")
-        for entry in result or []:
-            for text in entry.get("search_result", []):
-                if isinstance(text, str) and text.strip():
-                    return text.strip().strip('."').strip()
-        return ""
+        # 2026-09-28: the same COGNEE_ENABLED gate _extract() has. Without
+        # it, disabling Cognee only disabled the *topic* path: every run
+        # still opened a client here, waited for the search to fail, logged
+        # cognee.category.failed, and only then read the document locally —
+        # the right answer, reached after a pointless timeout.
+        #
+        # This is the recurring shape in this codebase (docs/LOG.md): a new
+        # rule gets applied at the one place it was written, and the second
+        # caller of the same idea keeps the old behaviour. The gate belongs
+        # on every path that talks to Cognee, not on the one that prompted
+        # the change.
+        if not COGNEE_ENABLED:
+            audit.log_event("cognee", "skipped", reason="COGNEE_ENABLED=0",
+                             query="product category")
+            return _category_from_local_text(whitepaper_path, _CATEGORY_QUESTION)
+        cognee = CogneeClient(CogneeSettings(dataset=dataset_for(whitepaper_path)))
+        # 2026-09-26: "what kind of real-world thing is this document
+        # about?" has two honest answers — the subject, and the document.
+        # Asked that way, one model said "a domestic cat" and another
+        # "Cat care manual", and the second would have had an image
+        # generator drawing a book. The question now asks what to point a
+        # camera at, which only has one answer.
+        query = _CATEGORY_QUESTION
+        try:
+            audit.log_event("cognee", "search.start", query="product category")
+            result = cognee.search(query)
+            audit.log_event("cognee", "search.done")
+            for entry in result or []:
+                for text in entry.get("search_result", []):
+                    if isinstance(text, str) and text.strip():
+                        answer = text.strip().strip('."').strip()
+                        if topic_index.clean_category(answer):
+                            return answer
+                        # 2026-09-26: Cognee's GRAPH_COMPLETION search
+                        # summarises. Asked for five words it returned
+                        # 1964 characters describing the whole document,
+                        # every time. An unusable answer used to fall
+                        # straight through to the human with nothing to
+                        # accept; the local reader below already answers
+                        # this question correctly, so try it first.
+                        audit.log_event("cognee", "category.unusable", chars=len(answer))
+        except Exception as e:  # noqa: BLE001 — Cognee down is not fatal here
+            audit.log_event("cognee", "category.failed", error=str(e))
+        # 2026-09-25: falls back to the local LLM reading the document
+        # directly. Cognee being down must not cost the category — without
+        # one, the image prompt carries only a brand name that means
+        # nothing to FLUX, and a run produced a picture of a dog for a
+        # whitepaper about cats.
+        return _category_from_local_text(whitepaper_path, query)
 
     index = topic_index.sync_topics(product_name, whitepaper_path, _extract,
-                                     extract_category_fn=_extract_category)
+                                     extract_category_fn=_extract_category,
+                                     skipped_fn=lambda: list(skipped_lines))
     return index.get("topics") or []
+
+
+def _category_from_local_text(whitepaper_path: str, question: str) -> str:
+    """Propose a category by reading the document here, no Cognee.
+
+    Deliberately the same question Cognee is asked, so the human sees the
+    same kind of answer either way and the two cannot drift into meaning
+    different things.
+    """
+    from .document import read_text
+
+    text = read_text(whitepaper_path, max_chars=4000)
+    if not text:
+        return ""
+    endpoint = os.environ.get("LLM_IMPROVE_ENDPOINT", "http://localhost:11434/v1/chat/completions")
+    model = os.environ.get("LLM_IMPROVE_MODEL", "llama3.2:3b")
+    try:
+        resp = requests.post(
+            endpoint,
+            json={"model": model,
+                  "messages": [{"role": "user", "content": f"{question}\n\nDocument:\n{text}"}],
+                  "temperature": 0.3},
+            timeout=90,
+        )
+        resp.raise_for_status()
+        answer = resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception:  # noqa: BLE001 — a proposal, not a requirement
+        return ""
+    return answer.strip().strip('."').strip()[:80]
 
 
 def step3_generate_drafts(
@@ -220,7 +401,16 @@ def step3_generate_drafts(
                      topics_offered=[t["topic"] for t in offered], improving_on_prior=bool(play),
                      has_context=bool(context.strip()))
     drafts = generator.draft_posts({"name": product_name, "features": features}, channel, n=n,
-                                    topics=offered, prior=play, target=target, context=context)
+                                    topics=offered, prior=play, target=target, context=context,
+                                    category=topic_index.load_category(product_name))
+    if not drafts:
+        # 2026-09-26: draft_posts() returns None when nothing could be
+        # grounded — it used to emit a canned draft instead. The callers
+        # were still written for "always a list", so removing the canned
+        # draft turned a bad post into a TypeError on len(None).
+        audit.log_event("draft_generator", "draft.none", product=product_name, channel=channel,
+                         topics_offered=len(offered), has_context=bool(context.strip()))
+        return []
     # `sources` makes a template-only run visible in audit/events.jsonl.
     # Without it, "draft.done n=1" looked identical whether the LLM wrote
     # the post or the canned string did — which is exactly why the dead
@@ -259,7 +449,8 @@ def step4_human_review(draft: dict[str, Any], product_name: str) -> Any:
 
 
 def step4b_generate_image(draft: dict[str, Any], final_text: str,
-                           product_name: str = "") -> tuple[bytes | None, str]:
+                           product_name: str = "",
+                           no_image: bool = False) -> tuple[bytes | None, str]:
     """Phase 4, 2026-09-16 (see image_generator.py) — runs right after
     text approval, before publish, so the image prompt is grounded in the
     *final* approved text, not a draft that might still change. Silently
@@ -278,6 +469,14 @@ def step4b_generate_image(draft: dict[str, Any], final_text: str,
     # no-text constraint.
     # A real image of the real product beats a generated approximation, so
     # the user's own files win when there are any (product_assets.py).
+    if no_image:
+        # An image is generated before the human ever sees the draft — the
+        # browser cannot pause mid-review to make one — so every draft
+        # costs a generation whether or not it survives review. This flag
+        # is for the case that makes that expensive: iterating on wording,
+        # where the pictures are thrown away every round.
+        audit.log_event("image", "skipped", draft_id=draft["id"], reason="--no-image")
+        return None, ""
     supplied = product_assets.next_image(product_name) if product_name else None
     if supplied is not None:
         image_bytes, source_path = supplied
@@ -309,6 +508,7 @@ def step4b_generate_image(draft: dict[str, Any], final_text: str,
 def step5_publish(
     draft: dict[str, Any], final_text: str, image: bytes | None = None, image_alt: str = "",
     original_text: str | None = None, acknowledged: bool = False,
+    video: bytes | None = None, video_alt: str = "",
 ) -> dict[str, Any]:
     """Posts for real on any *implemented* platform (see
     platforms/registry.py's PLATFORMS) — gated on the human approval that
@@ -363,11 +563,18 @@ def step5_publish(
     if channel in PLATFORMS:
         try:
             platform = get_platform(channel)
-            result = platform.publish_post(final_text, image=image, image_alt=image_alt)
+            if video:
+                # A video post is not a text post that happens to carry a
+                # file — Bluesky's own API separates them — so the adapter
+                # decides, and one that cannot do video says so rather than
+                # quietly publishing the text alone.
+                result = platform.publish_video(final_text, video, video_alt=video_alt)
+            else:
+                result = platform.publish_post(final_text, image=image, image_alt=image_alt)
             post_ref = result.get("uri") or result.get("id")
             published = {**draft, "text": final_text, "status": "published", "post_ref": post_ref}
             audit.log_event("publish", f"{channel}.posted", draft_id=draft["id"], ref=post_ref,
-                             has_image=bool(image))
+                             has_image=bool(image), has_video=bool(video))
             return published
         except Exception as e:
             # 2026-09-21: every platform error used to be caught here and
@@ -395,7 +602,8 @@ def step5_publish(
 
 
 def step6_queue_for_review(product_name: str, channel: str, published: dict[str, Any],
-                            edited: bool, reviewer_note: str) -> None:
+                            edited: bool, reviewer_note: str,
+                            labels: dict[str, Any] | None = None) -> None:
     """Replaces the old step6_track_metrics + step7_modiqo_capture pair
     (2026-09-15, docs/SCHEDULE.md Phase 9 — see the module docstring for
     why). No metrics pull here at all: writing this entry *is* the
@@ -407,7 +615,7 @@ def step6_queue_for_review(product_name: str, channel: str, published: dict[str,
         tracking_review.queue_for_review(
             post_id=published["id"], product=product_name, channel=channel,
             post_ref=published.get("post_ref"), final_text=published["text"],
-            edited=edited, reviewer_note=reviewer_note,
+            edited=edited, reviewer_note=reviewer_note, labels=labels,
         )
     except tracking_review.NotPublishedForReal as e:
         # A simulated publish (channel with no adapter). Recorded plainly
@@ -429,6 +637,24 @@ def step6_queue_for_review(product_name: str, channel: str, published: dict[str,
     if topic:
         topic_index.record_topic_used(product_name, topic)
         audit.log_event("topic_index", "used", product=product_name, topic=topic)
+
+
+# What the drafting model recorded about a draft, carried from generation
+# through the queue, publish and history so a later analysis can ask what
+# a post actually did rather than inferring it from timing.
+_LABEL_KEYS = ("topic_reason", "characteristics", "test_axis", "test_arm",
+               "evidence_used", "evidence_against")
+
+
+class StaleAnalysis(RuntimeError):
+    """A queued analysis predates a change that would alter its verdict.
+
+    Queued analyses are stored as finished text, so a fix to analysis.py
+    reaches nothing already waiting for a decision — and the decision path
+    writes the stored verdict straight into history. Without this check,
+    correcting the analysis would still leave the old wrong conclusion to
+    be recorded the next time someone clicked Confirm.
+    """
 
 
 class PublishFailed(RuntimeError):
@@ -574,12 +800,20 @@ def _finalize_analysis(entry: dict[str, Any], checkpoint: str, metrics: dict[str
     `analysis.human_confirmed`/`human_note` (stored either way, see
     analysis.confirm_with_human()'s own docstring), never which of
     capture_success/capture_failure runs.
+
+    Every event logged here carries `post_id` (2026-09-27). Before this
+    only `metrics.recorded` and `analysis_queue.queued` did, so a verdict
+    could be read out of the audit log but never tied back to the post it
+    judged — reconciling "7 posts have 24h in checkpoints_done" against
+    "2 rows in plays/_history.jsonl" took six separate queries and still
+    could not name which post each capture belonged to.
     """
     product_name, channel = entry["product"], entry["channel"]
     final_text = entry["final_text"]
     reviewer_note = entry.get("reviewer_note", "")
 
-    audit.log_event("analysis", "recorded", product=product_name, channel=channel,
+    audit.log_event("analysis", "recorded", post_id=entry.get("post_id"),
+                     product=product_name, channel=channel,
                      checkpoint=checkpoint, trend=analysis.trend,
                      n_prior_posts=analysis.n_prior_posts, human_confirmed=analysis.human_confirmed)
 
@@ -589,7 +823,8 @@ def _finalize_analysis(entry: dict[str, Any], checkpoint: str, metrics: dict[str
     verdict = judge(metrics, comparable_history(channel, checkpoint,
                                                  exclude_post_ids={entry.get("post_id")}))
     print(f"[{verdict.state}] {verdict.reason}")
-    audit.log_event("modiqo", "judged", product=product_name, channel=channel,
+    audit.log_event("modiqo", "judged", post_id=entry.get("post_id"),
+                     product=product_name, channel=channel,
                      checkpoint=checkpoint, state=verdict.state, score=verdict.score,
                      baseline_n=verdict.baseline_n, baseline_p75=verdict.baseline_p75)
 
@@ -601,8 +836,10 @@ def _finalize_analysis(entry: dict[str, Any], checkpoint: str, metrics: dict[str
         # `likes_only` now cannot reach it at all.
         play = capture_success(product_name, channel, final_text, metrics, reviewer_note,
                                 improvement_note=next_strategy, analysis=analysis.as_dict(),
-                                checkpoint=checkpoint)
-        audit.log_event("modiqo", "success.captured", product=product_name, channel=channel,
+                                checkpoint=checkpoint,
+                                evidence_used=entry.get("evidence_used", ""))
+        audit.log_event("modiqo", "success.captured", post_id=entry.get("post_id"),
+                         product=product_name, channel=channel,
                          checkpoint=checkpoint, runs=play["runs"], state=verdict.state)
     else:
         # Still recorded, with the state named: a `hypothesis` row is not
@@ -611,8 +848,10 @@ def _finalize_analysis(entry: dict[str, Any], checkpoint: str, metrics: dict[str
         reason = f"{verdict.state} at {checkpoint} checkpoint — {verdict.reason}"
         capture_failure(product_name, channel, final_text, reason,
                          improvement_note=next_strategy, analysis=analysis.as_dict(),
-                         checkpoint=checkpoint, metrics=metrics)
-        audit.log_event("modiqo", "failure.captured", product=product_name, channel=channel,
+                         checkpoint=checkpoint, metrics=metrics,
+                         evidence_used=entry.get("evidence_used", ""))
+        audit.log_event("modiqo", "failure.captured", post_id=entry.get("post_id"),
+                         product=product_name, channel=channel,
                          checkpoint=checkpoint, reason=reason, state=verdict.state)
 
     tracking_review.mark_checkpoint_done(entry, checkpoint)
@@ -650,6 +889,18 @@ def apply_analysis_decision(queue_entry: dict[str, Any], confirmed: bool, note: 
     terminal path runs right after its own input() call, then marks this
     queue entry decided.
     """
+    if analysis_queue.is_stale(queue_entry):
+        # Refused rather than silently recomputed. The human decided on
+        # the text they were shown; recomputing here would record a
+        # different verdict than the one they read. Re-running `review`
+        # re-queues it with current logic, and they decide on that.
+        raise StaleAnalysis(
+            f"{queue_entry.get('post_id')} @ {queue_entry.get('checkpoint')} was analysed by an "
+            "older version whose conclusions the current logic does not stand behind "
+            "(it judged a suggestion effective or not without checking whether the post "
+            "followed it, and drew trends from a single prior post). Run "
+            "`contentmaster review` to analyse it again, then decide on that."
+        )
     analysis = AnalysisResult(**queue_entry["analysis"])
     analysis.human_confirmed = confirmed
     analysis.human_note = note
@@ -768,11 +1019,18 @@ def run_review(checkpoint: str = "24h", terminal: bool = False) -> int:
     # up from last time" is not a safe assumption either.
     n_already_pending = 0
     for entry in due:
-        if analysis_queue.find_pending_for(entry["post_id"], checkpoint) is not None:
+        pending = analysis_queue.find_pending_for(entry["post_id"], checkpoint)
+        if pending is not None and not analysis_queue.is_stale(pending):
             n_already_pending += 1
             print(f"\n--- {entry['product']} / {entry['channel']} ({entry['post_id']}) ---")
             print("[skip] Already pending a human decision in the browser review queue.")
             continue
+        if pending is not None:
+            # Stale: re-analysed rather than skipped, which is the only way
+            # an entry queued before an analysis fix can ever be decided.
+            print(f"\n--- {entry['product']} / {entry['channel']} ({entry['post_id']}) ---")
+            print("[re-analysing] The queued analysis for this post predates a change to how "
+                  "verdicts are reached; replacing it with a current one.")
         print(f"\n--- {entry['product']} / {entry['channel']} ({entry['post_id']}) ---")
         try:
             if terminal:
@@ -873,7 +1131,8 @@ def _fallback_context(whitepaper_path: str, product_name: str, features: list[st
     return "\n\n".join(parts)
 
 
-def _run_terminal(product_name: str, channel: str, drafts: list[dict[str, Any]]) -> None:
+def _run_terminal(product_name: str, channel: str, drafts: list[dict[str, Any]],
+                   no_image: bool = False) -> None:
     """The original review flow, unchanged: text review then image review
     then publish then queue, one draft at a time, right here in the
     terminal.
@@ -887,10 +1146,13 @@ def _run_terminal(product_name: str, channel: str, drafts: list[dict[str, Any]])
                 capture_failure(product_name, channel, draft["text"], decision.reviewer_note or "rejected")
                 results.append({"draft": i, "status": "rejected", "text": draft["text"], "channel": channel})
                 continue
-            image, image_alt = step4b_generate_image(draft, decision.final_text, product_name)
+            image, image_alt = step4b_generate_image(draft, decision.final_text, product_name,
+                                                      no_image=no_image)
             published = step5_publish(draft, decision.final_text, image=image, image_alt=image_alt)
             step6_queue_for_review(product_name, channel, published,
-                                    edited=decision.edited, reviewer_note=decision.reviewer_note)
+                                    edited=decision.edited, reviewer_note=decision.reviewer_note,
+                                    labels={k: draft.get(k) for k in _LABEL_KEYS
+                                            if draft.get(k) is not None})
         except PublishFailed as e:
             # Nothing was sent. Treated as a stop for this draft rather
             # than a crash: the rest of the batch is still worth
@@ -918,7 +1180,8 @@ def _run_terminal(product_name: str, channel: str, drafts: list[dict[str, Any]])
     _print_run_summary(results)
 
 
-def _run_streamlit(product_name: str, channel: str, drafts: list[dict[str, Any]]) -> None:
+def _run_streamlit(product_name: str, channel: str, drafts: list[dict[str, Any]],
+                    no_image: bool = False) -> None:
     """2026-09-17 Phase 5 design: image generated eagerly for every draft
     right here (text and image ready together, since streamlit cannot
     pause mid review to generate reactively), queued for
@@ -936,19 +1199,29 @@ def _run_streamlit(product_name: str, channel: str, drafts: list[dict[str, Any]]
         # step4b_generate_image (terminal only) had already been fixed and
         # this had not. Third time a fix landed on one review surface and
         # not the other.
-        supplied = product_assets.next_image(product_name)
-        if supplied is not None:
+        if no_image:
+            image_bytes, image_path = None, None
+            audit.log_event("image", "skipped", draft_id=draft["id"], reason="--no-image")
+            draft["characteristics"] = list(draft.get("characteristics") or []) + ["no image"]
+            supplied = None
+        else:
+            supplied = product_assets.next_image(product_name)
+        if not no_image and supplied is not None:
             image_bytes, source_path = supplied
             audit.log_event("image", "supplied", draft_id=draft["id"], file=source_path.name)
             print(f"[image] Using your own file {source_path.name} instead of generating one.")
-        else:
+        elif not no_image:
             prompt = image_generator.build_image_prompt(
                 draft["text"], subject_hint=draft.get("brief", ""), product=product_name,
                 category=topic_index.load_category(product_name))
             image_bytes = image_generator.generate_image(prompt)
         image_path = None
         if image_bytes:
-            image_path = str(out_dir / f"{draft['id']}.png")
+            # Named for what it actually is. Cloudflare's FLUX returns
+            # JPEG, and every file written here since 2026-09-16 has been
+            # a .png containing one.
+            ext = image_generator.image_format(image_bytes) or "png"
+            image_path = str(out_dir / f"{draft['id']}.{ext}")
             Path(image_path).write_bytes(image_bytes)
         audit.log_event("image_generator", "generated_for_queue", draft_id=draft["id"],
                          has_image=bool(image_bytes))
@@ -1044,9 +1317,108 @@ def launch_streamlit() -> None:
     print("Opening the review page in your browser (http://localhost:8501 if it does not open on its own).")
 
 
+def run_video(whitepaper_path: str, channel: str = "bluesky", product_name: str | None = None,
+              features: list[str] | None = None, n_posts: int = 1,
+              target_region: str | None = None, target_audience: str | None = None) -> int:
+    """`contentmaster video` — the same loop as `run()`, but each draft gets
+    a composed video instead of a still image.
+
+    Its own command rather than a flag on `run()`, for two reasons that are
+    not about the code. A video costs four image generations and about 35
+    seconds where a still post costs one and about five, so it should be a
+    thing you ask for, not something that quietly happens. And you will
+    want to redo a video — the script is flat, the voice is wrong, one shot
+    missed — without regenerating and re-reviewing the text every time.
+
+    Deliberately NOT chosen by the model per post. Letting an LLM decide
+    "this one deserves a video" makes the eventual comparison
+    uninterpretable: if video posts do better, there is no way to separate
+    "video works" from "the model only picked video for posts it already
+    thought were strong". Video is recorded as a characteristic on every
+    draft so the comparison stays possible later, once a baseline exists
+    at all — at which point the choice can move to a fixed share of each
+    test group, the way the control arm already works (scoring.py). Today
+    it is a human decision, which is the honest version of a decision
+    nothing can yet verify.
+    """
+    from . import video_generator
+
+    if not video_generator.ffmpeg_available():
+        print("[error] ffmpeg and ffprobe are needed to compose video and were not found on "
+              "PATH. Install ffmpeg (`brew install ffmpeg` on macOS) and try again.")
+        return 1
+
+    whitepaper_path = whitepaper_path.strip()
+    audit.log_event("pipeline", "video.start", whitepaper=whitepaper_path, channel=channel)
+    product_name = product_name or Path(whitepaper_path).stem
+    print(f"[product] {describe_product(product_name)}")
+    try:
+        source_hash = topic_index.file_hash(whitepaper_path)
+    except OSError:
+        source_hash = None
+    remember_product(product_name, source_hash=source_hash, whitepaper=whitepaper_path)
+    features = features or []
+
+    # Same generation path as `run()` — the text half of a video post is
+    # not a different problem, so it must not be a second implementation.
+    drafts = _extract_topics_and_generate(whitepaper_path, channel, product_name, features,
+                                           n_posts, target_region=target_region,
+                                           target_audience=target_audience)
+    if not drafts:
+        print("[error] No drafts were generated, so there is nothing to make a video from.")
+        return 1
+
+    out_dir = settings.data_root / "generated_videos"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    category = topic_index.load_category(product_name)
+    queued = 0
+    for draft in drafts:
+        print(f"\n--- Composing video for {draft['id']} ---")
+        try:
+            video = video_generator.build(
+                draft["text"], product=product_name, category=category,
+                out_path=out_dir / f"{draft['id']}.mp4",
+                workdir=out_dir / f"{draft['id']}-parts",
+            )
+        except video_generator.VideoUnavailable as e:
+            audit.log_event("video", "failed", draft_id=draft["id"], reason=str(e))
+            print(f"[skipped] {e}")
+            continue
+        for warning in video.warnings:
+            print(f"[warn] {warning}")
+        audit.log_event("video", "composed", draft_id=draft["id"], beats=len(video.beats),
+                         seconds=round(video.seconds, 1), bytes=video.path.stat().st_size)
+        print(f"{len(video.beats)} beat(s), {video.seconds:.1f}s, "
+              f"{video.path.stat().st_size / 1e6:.1f} MB")
+
+        labels = {k: draft.get(k) for k in
+                  ("topic_reason", "test_axis", "test_arm", "evidence_used", "evidence_against")
+                  if draft.get(k) is not None}
+        # Recorded on every draft so "does video do better than a still?"
+        # stays answerable later. It is a fact about the post, not a
+        # verdict on it.
+        labels["characteristics"] = list(draft.get("characteristics") or []) + ["has video"]
+        labels["video_path"] = str(video.path)
+        labels["video_seconds"] = round(video.seconds, 1)
+        labels["video_alt"] = video.alt
+        draft_queue.queue_draft(
+            draft["id"], product_name, channel, draft["text"],
+            topic=draft.get("topic", ""), brief=draft.get("brief", ""),
+            source=draft.get("source", "unknown"), labels=labels,
+        )
+        queued += 1
+
+    audit.log_event("pipeline", "video.done", n=queued)
+    if queued:
+        print(f"\n{queued} draft(s) with video queued for review.")
+        launch_streamlit()
+    return 0
+
+
 def run(whitepaper_path: str, channel: str = "x", product_name: str | None = None,
         features: list[str] | None = None, n_posts: int = 1, terminal: bool = False,
-        target_region: str | None = None, target_audience: str | None = None) -> None:
+        target_region: str | None = None, target_audience: str | None = None,
+        no_image: bool = False) -> None:
     """`n_posts` (2026-09-16): default changed 3 -> 1 per the user, while
     still testing — reviewing 3 drafts (each with its own text review,
     possible image review) every run was too much at this stage. Still
@@ -1087,27 +1459,16 @@ def run(whitepaper_path: str, channel: str = "x", product_name: str | None = Non
         source_hash = None  # unreadable path is reported properly further down
     print(f"[product] {describe_product(product_name)}")
     remember_product(product_name, source_hash=source_hash, whitepaper=whitepaper_path)
-    if not features:
-        # 2026-09-19 (code scan): these describe THIS PIPELINE, not
-        # whatever product is being marketed — they date from when the
-        # whitepaper being processed was this project's own. Left in as a
-        # last-resort placeholder, but never silently: a real run produced
-        # "How to Use a Cat — compound memory. Built for teams who ship
-        # fast." and nothing anywhere said where "compound memory" came
-        # from. Pass --features to replace them.
-        features = list(PLACEHOLDER_FEATURES)
-        print(f"[warn] No --features given for '{product_name}' — falling back to the built-in "
-              f"placeholders {features}, which describe this pipeline, not your product. "
-              f"They are only used if generation cannot be grounded any other way.")
+    features = features or []
     drafts = _extract_topics_and_generate(whitepaper_path, channel, product_name, features, n_posts,
                                            target_region=target_region, target_audience=target_audience)
-    if drafts is None:
+    if not drafts:
         return
 
     if terminal:
-        _run_terminal(product_name, channel, drafts)
+        _run_terminal(product_name, channel, drafts, no_image=no_image)
     else:
-        _run_streamlit(product_name, channel, drafts)
+        _run_streamlit(product_name, channel, drafts, no_image=no_image)
 
 
 def _print_run_summary(results: list[dict[str, Any]]) -> None:

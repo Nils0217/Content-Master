@@ -25,6 +25,34 @@ from typing import Sequence
 from . import pipeline as _pipeline
 
 
+def _resolve_whitepaper(given: str | None) -> str | None:
+    """A full path, a bare filename in the whitepapers folder, or nothing
+    when that folder holds exactly one document. Says what it could not
+    resolve rather than failing later with an unreadable path — a run that
+    cannot read its source does not stop, it falls back to a cached index
+    and quietly writes about the previous version of the document.
+    """
+    from . import folders
+
+    resolved = folders.resolve_document(given)
+    if resolved is not None:
+        return str(resolved)
+    docs = folders.documents()
+    folder = folders.get("whitepapers")
+    if given:
+        print(f"[error] Could not find {given!r}, either as a path or inside {folder}.")
+    elif not docs:
+        print(f"[error] No source document given, and {folder} holds none. "
+              "Put one there, or point somewhere else with `contentmaster folders "
+              "--whitepapers PATH`.")
+    else:
+        print(f"[error] No source document given, and {folder} holds {len(docs)}. "
+              "Name one with --whitepaper:")
+        for d in docs:
+            print(f"          {d.name}")
+    return None
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     # 2026-09-19 (code scan): say out loud when the chosen channel has no
     # adapter. `--channel x` used to be the DEFAULT while `x` sat in
@@ -36,14 +64,62 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"[warn] '{args.channel}' has no implemented adapter yet — this run will go through "
               f"the whole loop but the publish step is a labeled simulation, not a real post. "
               f"Implemented now: {', '.join(PLATFORMS) or '(none)'}.")
-    _pipeline.run(args.whitepaper, channel=args.channel, product_name=args.product_name,
+    whitepaper = _resolve_whitepaper(args.whitepaper)
+    if whitepaper is None:
+        return 1
+    _pipeline.run(whitepaper, channel=args.channel, product_name=args.product_name,
                    features=args.features, n_posts=args.posts, terminal=args.terminal,
-                   target_region=args.target_region, target_audience=args.target_audience)
+                   target_region=args.target_region, target_audience=args.target_audience,
+                   no_image=args.no_image)
     return 0
 
 
 def _cmd_review(args: argparse.Namespace) -> int:
     return _pipeline.run_review(checkpoint=args.checkpoint, terminal=args.terminal)
+
+
+def _cmd_video(args: argparse.Namespace) -> int:
+    whitepaper = _resolve_whitepaper(args.whitepaper)
+    if whitepaper is None:
+        return 1
+    return _pipeline.run_video(
+        whitepaper, channel=args.channel, product_name=args.product_name,
+        features=args.features, n_posts=args.posts,
+        target_region=args.target_region, target_audience=args.target_audience)
+
+
+def _cmd_folders(args: argparse.Namespace) -> int:
+    from . import folders
+
+    changed = False
+    for kind, value in (("whitepapers", args.whitepapers), ("external", args.external)):
+        if not value:
+            continue
+        try:
+            resolved = folders.set_folder(kind, value)
+        except (NotADirectoryError, ValueError) as e:
+            print(f"[error] {e}")
+            return 1
+        print(f"{kind}: now {resolved}")
+        changed = True
+
+    described = folders.describe()
+    if changed:
+        print()
+    for kind, info in described.items():
+        files = info["files"]
+        label = "source documents" if kind == "whitepapers" else "external data files"
+        print(f"{kind:<12} {info['path']}")
+        if not info["path"].is_dir():
+            print(f"{'':<12}   (folder does not exist)")
+        elif not files:
+            print(f"{'':<12}   (no {label} in it)")
+        else:
+            for f in files:
+                print(f"{'':<12}   {f.name}")
+    if not changed:
+        print("\nSet one with:  contentmaster folders --whitepapers \"Some folder\"")
+    return 0
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
@@ -154,7 +230,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_run = sub.add_parser("run", help="Run the full extract -> draft -> review -> publish -> improve loop")
-    p_run.add_argument("--whitepaper", required=True, help="Path to the source document")
+    p_run.add_argument(
+        "--whitepaper", default=None,
+        help="Source document. A full path, or just the filename inside the whitepapers "
+             "folder (see `contentmaster folders`). Omit it when that folder holds exactly "
+             "one document.",
+    )
     p_run.add_argument(
         "--channel", default="bluesky",
         help="Target platform to publish to — see `contentmaster platforms` for what's "
@@ -173,6 +254,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--posts", type=int, default=1,
         help="How many drafts to generate/review this run (default: 1 — kept small while "
              "still testing; each one gets its own text + possible image review)",
+    )
+    p_run.add_argument(
+        "--no-image", action="store_true",
+        help="Skip image generation entirely. An image is made for every draft before you see "
+             "it — the browser cannot pause mid-review to make one — so a run you expect to "
+             "reject costs a generation per draft either way. Use this while iterating on "
+             "wording. Recorded as a 'no image' characteristic, so whether images help stays "
+             "answerable later.",
     )
     p_run.add_argument(
         "--terminal", action="store_true",
@@ -215,6 +304,43 @@ def build_parser() -> argparse.ArgumentParser:
              "no human decision — safe to run as often as you like)",
     )
     p_refresh.set_defaults(func=_cmd_refresh)
+
+    p_video = sub.add_parser(
+        "video",
+        help="Draft a post and compose a short video for it (script -> images -> speech -> "
+             "ffmpeg), then review it in the browser",
+    )
+    p_video.add_argument(
+        "--whitepaper", default=None,
+        help="Source document; same resolution as `run` (see `contentmaster folders`).",
+    )
+    p_video.add_argument("--channel", default="bluesky", help="Target platform (default: bluesky)")
+    p_video.add_argument("--product-name", default=None)
+    p_video.add_argument("--features", nargs="+", metavar="FEATURE", default=None,
+                          help="What this product does — same as `run`")
+    p_video.add_argument("--posts", type=int, default=1,
+                          help="How many drafts to make videos for (default: 1 — each one costs "
+                               "several image generations and about half a minute)")
+    p_video.add_argument("--target-region", default=None)
+    p_video.add_argument("--target-audience", default=None)
+    p_video.set_defaults(func=_cmd_video)
+
+    p_folders = sub.add_parser(
+        "folders",
+        help="Show or set where source documents and external data live. Run with no "
+             "arguments to see the current folders and what is in them.",
+    )
+    p_folders.add_argument(
+        "--whitepapers", metavar="PATH", default=None,
+        help="Folder holding the source documents. Also decides the Cognee dataset, so "
+             "documents for different products belong in different folders.",
+    )
+    p_folders.add_argument(
+        "--external", metavar="PATH", default=None,
+        help="Folder holding external data (Google Trends exports and similar) that dbt "
+             "loads as seeds.",
+    )
+    p_folders.set_defaults(func=_cmd_folders)
 
     p_status = sub.add_parser(
         "status",

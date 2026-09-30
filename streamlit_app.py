@@ -35,10 +35,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 import streamlit as st
 
 from contentmaster import analysis_queue, draft_queue
+from contentmaster.analysis import describe_effectiveness
 from contentmaster.draft_generator import DraftGenerator
 from contentmaster.modiqo_play import capture_failure
 from contentmaster.pipeline import apply_analysis_decision, step5_publish, step6_queue_for_review
-from contentmaster.pipeline import PublishFailed
+from contentmaster.pipeline import PublishFailed, StaleAnalysis
 from contentmaster.publish_guard import publish_blockers
 from contentmaster.platforms.registry import get_platform
 
@@ -226,8 +227,22 @@ with tab_drafts:
         _show_length(entry["channel"], st.session_state[text_key])
         _show_labels(entry)
 
-        if entry.get("image_path") and Path(entry["image_path"]).exists():
-            st.image(entry["image_path"], caption="Generated image")
+        if entry.get("video_path") and Path(entry["video_path"]).exists():
+            st.video(entry["video_path"])
+            st.caption(f"Composed video — {entry.get('video_seconds', '?')}s. "
+                       "Watch it before approving: a terminal cannot show this, which is the "
+                       "reason this page exists.")
+        elif entry.get("image_path") and Path(entry["image_path"]).exists():
+            # 2026-09-25: one unreadable file used to raise
+            # UnidentifiedImageError out of st.image and take down the
+            # entire review page — every draft, not just this one. A
+            # picture that will not open is a reason to skip the picture,
+            # not to lose the text review with it.
+            try:
+                st.image(entry["image_path"], caption="Generated image")
+            except Exception as e:  # noqa: BLE001 — any decode failure, same answer
+                st.warning(f"The image for this draft could not be opened ({e}). "
+                           "Approving will publish the text without it.")
         else:
             st.caption("No image for this draft (Cloudflare not configured, or the call failed).")
 
@@ -242,13 +257,17 @@ with tab_drafts:
             # button) silently never made it into the real post — text-only
             # every time, even though the terminal path's step4b_generate_image
             # always attaches one when present.
-            image_bytes = None
-            if entry.get("image_path") and Path(entry["image_path"]).exists():
+            image_bytes = video_bytes = None
+            video_path = entry.get("video_path")
+            if video_path and Path(video_path).exists():
+                video_bytes = Path(video_path).read_bytes()
+            elif entry.get("image_path") and Path(entry["image_path"]).exists():
                 image_bytes = Path(entry["image_path"]).read_bytes()
             image_alt = (entry.get("brief") or st.session_state[text_key])[:200]
             try:
                 published = step5_publish(
                     draft, st.session_state[text_key], image=image_bytes, image_alt=image_alt,
+                    video=video_bytes, video_alt=entry.get("video_alt", ""),
                     # The text as first generated, kept by the Edit box below
                     # — publish_guard compares against it to tell a terse
                     # rewrite from feedback typed into the wrong box.
@@ -285,6 +304,9 @@ with tab_drafts:
                 # carries an explicit `edited` flag instead.
                 edited=bool(entry.get("edited")) or st.session_state[text_key] != entry["text"],
                 reviewer_note=entry.get("reviewer_note", ""),
+                labels={k: entry.get(k) for k in
+                        ("topic_reason", "characteristics", "test_axis", "test_arm",
+                         "evidence_used", "evidence_against") if entry.get(k) is not None},
             )
             draft_queue.update_entry(draft_id, status="published", text=st.session_state[text_key])
             st.success(f"Published. {published.get('status')}")
@@ -396,14 +418,30 @@ with tab_analysis:
         st.subheader(f"{tracking_entry['product']} on {tracking_entry['channel']} — {checkpoint} checkpoint")
         st.write(tracking_entry.get("final_text", ""))
 
-        st.write(f"prior published posts at this tier: {analysis.get('n_prior_posts')}")
-        if analysis.get("historical_avg_score") is not None:
-            st.write(f"historical avg score: {analysis['historical_avg_score']:.4f}")
-        st.write(f"current score: {metrics.get('engagement_score', 0):.4f}")
-        st.write(f"trend: {analysis.get('trend')}")
+        st.write(f"score: **{metrics.get('engagement_score', 0):.4f}**")
+        # A comparison is only shown when there is something to compare
+        # against. Showing "prior posts: 1 / historical avg: 1.0000" above
+        # an evidence line that says there is no usable baseline put two
+        # contradictory claims on the same screen, and the numbers are the
+        # half people read.
+        if analysis.get("has_baseline"):
+            st.write(f"prior published posts at this tier: {analysis.get('n_prior_posts')}")
+            if analysis.get("historical_avg_score") is not None:
+                st.write(f"historical avg score: {analysis['historical_avg_score']:.4f}")
+            st.write(f"trend: {analysis.get('trend')}")
+        else:
+            st.info(
+                f"No baseline yet — {analysis.get('n_prior_posts')} comparable post(s) at this "
+                "tier. Nothing below is a verdict on this post; the recommendation is a "
+                "hypothesis to test, not a conclusion from data."
+            )
         if analysis.get("prior_suggestion"):
-            st.write(f"prior suggestion: {analysis['prior_suggestion']!r} — looks "
-                     f"{analysis.get('prior_suggestion_effectiveness')}")
+            # Shared with the terminal path rather than formatted again
+            # here — see .claude/skills/two-review-surfaces.
+            with st.expander(
+                f"Last round's suggestion — {describe_effectiveness(analysis.get('prior_suggestion_effectiveness', ''))}"
+            ):
+                st.write(analysis["prior_suggestion"])
         st.caption(analysis.get("evidence", ""))
         if analysis.get("external_signal"):
             st.caption(analysis["external_signal"])
@@ -412,10 +450,28 @@ with tab_analysis:
 
         st.markdown(f"**Recommendation for the next post:** {recommendation}")
 
+        # 2026-09-24: a queued analysis is stored as finished text, so a
+        # fix to how verdicts are reached does not reach anything already
+        # waiting here — and deciding on it writes the old verdict into
+        # history. Said plainly rather than silently recomputed: you
+        # decided on what you read, and recomputing behind that would
+        # record something else.
+        if analysis_queue.is_stale(a_entry):
+            st.warning(
+                "This analysis was produced before a change to how verdicts are reached — it "
+                "may state a trend drawn from a single prior post, or call a suggestion "
+                "ineffective without checking whether the post followed it. Run "
+                "`contentmaster review` to analyse it again, then decide on the new one."
+            )
+
         col_c, col_d = st.columns(2)
 
         if col_c.button("Confirm", key=f"confirm_{a_key}"):
-            apply_analysis_decision(a_entry, confirmed=True, note="")
+            try:
+                apply_analysis_decision(a_entry, confirmed=True, note="")
+            except StaleAnalysis as e:
+                st.error(str(e))
+                st.stop()
             st.success("Confirmed.")
             st.rerun()
 
@@ -428,7 +484,11 @@ with tab_analysis:
                 key=f"disagree_note_{a_key}",
             )
             if st.button("Submit disagreement", key=f"submit_disagree_{a_key}"):
-                apply_analysis_decision(a_entry, confirmed=False, note=note)
+                try:
+                    apply_analysis_decision(a_entry, confirmed=False, note=note)
+                except StaleAnalysis as e:
+                    st.error(str(e))
+                    st.stop()
                 st.session_state[f"show_disagree_{a_key}"] = False
                 st.info("Disagreement recorded.")
                 st.rerun()
