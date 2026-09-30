@@ -43,6 +43,13 @@ class BlueskyPlatform(Platform):
         max_images=4,
         max_image_alt_chars=2000,
         supported_image_types=("image/jpeg", "image/png", "image/webp", "image/gif"),
+        # Raised to 10 minutes / 300MB in August 2026 (was 3 minutes, and
+        # 60 seconds before that). Note Bluesky also requires a verified
+        # email before an account's first video upload, and caps an account
+        # at 25 videos or 10GB a day — neither is checkable from here, so
+        # both surface as an API error at upload time.
+        max_video_seconds=600,
+        max_video_bytes=300_000_000,
     )
 
     def __init__(self, cfg: BlueskySettings | None = None):
@@ -181,6 +188,27 @@ class BlueskyPlatform(Platform):
             raise PlatformAPIError(f"Network error reaching Bluesky: {e}") from e
         except AtProtocolError as e:
             raise PlatformAPIError(f"Bluesky API error while fetching post metrics: {e}") from e
+
+    def publish_video(self, text: str, video: bytes, video_alt: str = "") -> dict[str, Any]:
+        violations = self.constraints.video_violations(0, len(video))
+        if violations:
+            raise PlatformContentRejected("; ".join(violations))
+        if len(text) > self.max_post_chars:
+            raise PlatformContentRejected(
+                f"Bluesky posts are capped at {self.max_post_chars} characters, got {len(text)}."
+            )
+        client = self._get_client()
+        try:
+            result = client.send_video(text=text, video=video, video_alt=video_alt or None)
+        except RateLimitExceededError as e:
+            raise PlatformRateLimitError("Bluesky rate limit hit while posting video.") from e
+        except NetworkError as e:
+            raise PlatformAPIError(f"Network error reaching Bluesky: {e}") from e
+        except AtProtocolError as e:
+            # Covers the two limits this adapter cannot check in advance:
+            # an unverified account email, and the 25-video/10GB daily cap.
+            raise PlatformAPIError(f"Bluesky API error while posting video: {e}") from e
+        return {"uri": result.uri, "cid": result.cid}
 
     def get_post_metrics(self, post_ref: str) -> dict[str, Any]:
         """`post_ref` is the `uri` returned by publish_post(). Freshly-posted

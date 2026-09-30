@@ -126,6 +126,8 @@ class PlatformConstraints:
     max_images: int | None = None
     max_image_alt_chars: int | None = None
     supported_image_types: tuple[str, ...] = ()
+    max_video_seconds: float | None = None
+    max_video_bytes: int | None = None
 
     def describe_for_prompt(self) -> str:
         """The hard rules, phrased for the generation prompt. Only the
@@ -140,7 +142,23 @@ class PlatformConstraints:
             parts.append(f"at most {self.max_images} image(s)")
         if self.max_image_alt_chars:
             parts.append(f"image alt text at most {self.max_image_alt_chars} characters")
+        if self.max_video_seconds:
+            parts.append(f"video at most {self.max_video_seconds:g} seconds")
         return "; ".join(parts)
+
+    def video_violations(self, seconds: float, size_bytes: int) -> list[str]:
+        """Hard rules a finished video breaks. Checked before upload, so a
+        too-long clip is caught here rather than after the bytes have been
+        sent and rejected.
+        """
+        problems = []
+        if self.max_video_seconds and seconds > self.max_video_seconds:
+            problems.append(f"{seconds:.1f}s long, over the platform's limit of "
+                            f"{self.max_video_seconds:g}s")
+        if self.max_video_bytes and size_bytes > self.max_video_bytes:
+            problems.append(f"{size_bytes / 1_000_000:.1f} MB, over the platform's limit of "
+                            f"{self.max_video_bytes / 1_000_000:.0f} MB")
+        return problems
 
     def violations(self, text: str) -> list[str]:
         """Every hard rule `text` breaks. Empty list means publishable as
@@ -221,6 +239,14 @@ class Platform(ABC):
         that is a definite answer, not a failure, and callers must not
         substitute made-up numbers for it.
         """
+
+    def publish_video(self, text: str, video: bytes, video_alt: str = "") -> dict[str, Any]:
+        """Post with a video attached. Default: not supported, which is a
+        real answer rather than a silent text-only fallback — a video that
+        quietly did not go out is the failure mode this project has already
+        been bitten by with images.
+        """
+        raise PlatformAPIError(f"{self.name} has no video support in this adapter.")
 
     def get_post_metrics_batch(self, post_refs: list[str]) -> dict[str, dict[str, Any]]:
         """Same as get_post_metrics() for many posts at once, keyed by

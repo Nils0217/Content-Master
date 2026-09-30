@@ -45,3 +45,8 @@ archive/
 # inventing one (see src/contentmaster/product_assets.py). Local like the
 # whitepapers they sit beside — inputs, not code.
 product_assets/
+
+# Composed videos and their intermediate parts (see
+# src/contentmaster/video_generator.py). Generated output, and an mp4 per
+# post would bloat the repo fast.
+generated_videos/
