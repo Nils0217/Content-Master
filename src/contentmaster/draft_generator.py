@@ -536,7 +536,18 @@ class DraftGenerator:
         wanted = n or len(topics)
         # Counted across a whole test group, not this batch — a batch of 1
         # can never be 20% of anything (draft_labels.controls_needed).
-        controls = draft_labels.controls_needed(name, channel, wanted)
+        #
+        # 2026-10-05: only once a baseline exists. Before that the "evidence"
+        # is one previous post and its score, which proves no pattern, so
+        # contradicting it tests nothing — and with the usual batch of 1,
+        # the same post was told to be a control AND to test the hypothesis:
+        # two changes at once, which is exactly what both rules forbid. In
+        # that period the hypothesis is the test, and posts marked
+        # `HYPOTHESIS: no` are what it is compared against. Real drafts
+        # showed the quota was not working anyway: EVIDENCE-AGAINST read
+        # `None`, `Lifestyle`, or blank.
+        controls = (draft_labels.controls_needed(name, channel, wanted)
+                    if (prior or {}).get("has_baseline") else 0)
         topic_lines = "\n".join(
             f"- {t['topic']} (used {t.get('used_count', 0)} time(s)): {t['brief']}"
             for t in topics

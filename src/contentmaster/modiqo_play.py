@@ -285,6 +285,11 @@ def find_best_prior(
                 # 2026-10-04: the structured test, so drafting can write a
                 # post that tests it rather than reading it as advice.
                 "hypothesis": record.get("next_hypothesis"),
+                # Whether this prior result had a baseline to be judged
+                # against. Without one it is not evidence of a pattern, so
+                # there is nothing for a control post to contradict — see
+                # draft_generator's control-arm gate.
+                "has_baseline": bool(analysis.get("has_baseline")),
             }
     return None
 

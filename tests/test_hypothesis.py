@@ -180,6 +180,20 @@ dg.DraftGenerator()._llm_draft_posts_for_topics("Fluffy roommate", "bluesky", to
 assert "HYPOTHESIS" not in seen["prompt"]
 print("14. 沒有 hypothesis 時,prompt 不多出這一段 ✅")
 
+# 2026-10-05: 沒基準線時不要求對照組 —— 那時沒有證據可以違背,hypothesis 才是測試
+notes = []
+import builtins
+_print = builtins.print
+builtins.print = lambda *a, **k: notes.append(" ".join(map(str, a)))
+dg.DraftGenerator()._llm_draft_posts_for_topics("Fluffy roommate", "bluesky", topics, prior, None, n=1)
+builtins.print = _print
+assert "REQUIRED:" not in seen["prompt"] and "HYPOTHESIS TO TEST" in seen["prompt"], seen["prompt"]
+assert not any("required to go against" in n for n in notes), notes
+warm_prior = {"winning_text": "x", "last_metrics": {}, "has_baseline": True}
+dg.DraftGenerator()._llm_draft_posts_for_topics("Fluffy roommate", "bluesky", topics, warm_prior, None, n=1)
+assert "REQUIRED:" in seen["prompt"], "有基準線時對照組規則要照舊"
+print("14b. 沒基準線:不要求對照組,只測 hypothesis（不會一篇同時改兩件事）;有基準線:對照組照舊 ✅")
+
 from contentmaster import pipeline
 assert "tests_hypothesis_id" in pipeline.LABEL_KEYS
 app = (Path(__file__).resolve().parent.parent / "streamlit_app.py").read_text()
@@ -213,6 +227,7 @@ assert row["next_hypothesis"]["id"] == "hyp-test1" and row["reasoning_id"] == "r
 assert row["environment"]["followers"] == 0
 prior = modiqo_play.find_best_prior("Fluffy roommate", "bluesky")
 assert prior["hypothesis"]["test"] == H["test"]
+assert prior["has_baseline"] is False
 print("17. history 一列就看得到:哪篇、測了哪個假設、當時環境、下一篇要測什麼、每一步在哪 ✅")
 print("    下一篇寫草稿時讀得到那個假設 ✅")
 print("\nall passed")
