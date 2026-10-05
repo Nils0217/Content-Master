@@ -76,6 +76,10 @@ class AnalysisResult:
     # would switch the system off exactly during the period it has to
     # operate.
     has_baseline: bool = False
+    # 2026-10-05: when the post being analysed was testing a hypothesis,
+    # what happened to the number that test said to watch — see
+    # hypothesis.evaluate(). None when it was not testing anything.
+    hypothesis_result: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -94,6 +98,7 @@ class AnalysisResult:
             "external_signal": self.external_signal,
             "trending_context": self.trending_context,
             "has_baseline": self.has_baseline,
+            "hypothesis_result": self.hypothesis_result,
         }
 
 
@@ -466,6 +471,9 @@ def confirm_with_human(result: AnalysisResult, recommendation: str,
         print(f"prior suggestion       : {summarize_prior_suggestion(result.prior_suggestion)}")
         print(f"was it followed        : {describe_effectiveness(result.prior_suggestion_effectiveness)}")
     print(result.evidence)
+    if result.hypothesis_result:
+        from .hypothesis import result_line
+        print(f"TEST RESULT  {result_line(result.hypothesis_result)}")
     if result.external_signal:
         print(result.external_signal)
     if result.trending_context:

@@ -140,6 +140,14 @@ ANALYSIS_SCHEMA = 3 → 之前排隊的分析標成過期,`review` 會重新分�
 實際草稿的 EVIDENCE-AGAINST 寫的是 `None`、`Lifestyle` 或空白,規則本來就沒在運作。
 現在 `find_best_prior()` 帶 `has_baseline`,沒有就 `controls = 0`,hypothesis 就是那段期間的測試。
 
+**測完要收尾。** 原本假設提出了、也寫了貼文去測,但 checkpoint 分析只拿總分比基準線,
+從不回頭看那個測試指定要看的數字 —— 迴圈沒閉合。現在 `_pull_and_analyze()` 遇到
+`tests_hypothesis_id` 就呼叫 `hypothesis.evaluate()`:測試貼文的 WATCH 數字 vs. 同一 checkpoint、
+**沒有**測這個假設的貼文的中位數（`modiqo_play.readings_without()`,少於 2 篇就回 `no_comparison`）。
+結果只有 `moved` / `did_not_move` / `no_comparison` / `unreadable`,附發文環境,措辭是
+「在這些條件下沒動」,不是對錯。存進 `AnalysisResult.hypothesis_result` 和 history,
+兩個審核介面用同一句 `result_line()` 顯示,顧問提下一個假設前也會看到。
+
 **討論過、決定不做:Elasticsearch。** AI 回饋太亂太長是因為內容沒結構,不是搜尋問題;
 資料量幾百筆;8GB 機器已跑五個模型。改成結構化欄位 + 一行摘要 + DuckDB 查詢。
 累積到幾千篇、需要「找意思相近的」時再評估,先試已保留的 Cognee。
@@ -206,7 +214,7 @@ draft-c40f6ecd  10/05 發佈,第一篇記下發文環境的貼文;24h 之後要�
 | test_rtfd_bundle | macOS .rtfd 是資料夾不是檔案 | `resolve_bundle()` 指到裡面的 `TXT.rtf`;不存在的 bundle 回 `""` 不拋錯 |
 | test_folders | 資料夾選擇 | whitepapers / external 兩個獨立設定,存在 `plays/_folders.json` |
 | test_judge_model | 三模型互評 | judge 必須是第三個不同家族;prompt 不含模型 ID;裁判失敗時退回兩案 |
-| **test_hypothesis** | hypothesis 全流程,18 項 | 用真實模型原樣回覆解析;裁判只選不改寫;三步 prompt+回覆都存且帶 post_id;讀不出 vs. 沒回應分得開;兩個審核介面共用畫面;草稿帶 hypothesis 並記 id;沒基準線不要求對照組;環境查不到記成未知不是 0;history 一列追得回去 |
+| **test_hypothesis** | hypothesis 全流程,23 項 | 用真實模型原樣回覆解析;裁判只選不改寫;三步 prompt+回覆都存且帶 post_id;讀不出 vs. 沒回應分得開;兩個審核介面共用畫面;草稿帶 hypothesis 並記 id;沒基準線不要求對照組;環境查不到記成未知不是 0;history 一列追得回去;測完回頭讀 WATCH 數字、比較對象排除同假設的貼文、兩介面同一句結果 |
 | test_video | 影片組裝 | script → 分鏡 → TTS → ffmpeg;`-- ` 前綴的分鏡也要解析得出來 |
 
 **跑法:**

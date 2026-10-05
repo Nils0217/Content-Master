@@ -66,3 +66,18 @@ def load(reasoning_id: str) -> dict[str, Any] | None:
                 if row.get("reasoning_id") == reasoning_id:
                     found = row
     return found
+
+
+def find_hypothesis(hypothesis_id: str) -> dict[str, Any] | None:
+    """The hypothesis a post said it tested, by id. Read from here rather
+    than history because it exists the moment an analysis chooses it,
+    before any human has decided on that analysis."""
+    if not hypothesis_id or not REASONING_PATH.exists():
+        return None
+    with REASONING_PATH.open() as fh:
+        for line in fh:
+            if hypothesis_id in line:
+                h = (json.loads(line).get("hypothesis") or {})
+                if h.get("id") == hypothesis_id:
+                    return h
+    return None

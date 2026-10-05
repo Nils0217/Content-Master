@@ -136,6 +136,10 @@ def _proposal_prompt(
             "improving or declining, and do not infer anything from this single post's score. "
             "You know nothing about who follows this account or where they are."
         )
+    if analysis.hypothesis_result:
+        # 2026-10-05: what the last test found, so the next one builds on it
+        # instead of starting over. Worded as conditions, not a verdict.
+        prompt += "\n\nRESULT OF THE TEST THIS POST WAS RUNNING: " + hyp.result_line(analysis.hypothesis_result)
     if analysis.human_note:
         prompt += f" A human reviewer added this note: {analysis.human_note}"
     if analysis.external_signal:

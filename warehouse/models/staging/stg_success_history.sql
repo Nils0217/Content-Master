@@ -48,6 +48,9 @@ select
     next_hypothesis.id as next_hypothesis_id,
     next_hypothesis.test as next_hypothesis_test,
     next_hypothesis.watch as next_hypothesis_watch,
+    hypothesis_result.outcome as tested_outcome,
+    hypothesis_result.value as tested_value,
+    hypothesis_result.comparison_median as tested_comparison_median,
     reasoning_id
 from read_json(
     '../plays/_history.jsonl',
@@ -67,6 +70,7 @@ from read_json(
         tests_hypothesis_id: 'VARCHAR',
         environment: 'STRUCT(followers BIGINT)',
         next_hypothesis: 'STRUCT(id VARCHAR, test VARCHAR, watch VARCHAR)',
+        hypothesis_result: 'STRUCT(outcome VARCHAR, value BIGINT, comparison_median DOUBLE)',
         reasoning_id: 'VARCHAR'
     }
 )

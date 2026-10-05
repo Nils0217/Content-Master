@@ -1,4 +1,4 @@
-import os, shutil, sys, json
+import os, shutil, sys, json, inspect
 from pathlib import Path
 R=Path(sys.argv[1]); shutil.rmtree(R, ignore_errors=True); R.mkdir(parents=True)
 os.environ["CONTENTMASTER_DATA_ROOT"]=str(R)
@@ -230,4 +230,61 @@ assert prior["hypothesis"]["test"] == H["test"]
 assert prior["has_baseline"] is False
 print("17. history 一列就看得到:哪篇、測了哪個假設、當時環境、下一篇要測什麼、每一步在哪 ✅")
 print("    下一篇寫草稿時讀得到那個假設 ✅")
+
+# --- 測完要收尾:回頭看那個測試指定要看的數字（2026-10-05）---
+Hl = {"id": "hyp-L", "test": "open with a question", "watch": "likes"}
+others = [{"like_count": 0}, {"like_count": 0}, {"like_count": 1}]
+r = hyp.evaluate(Hl, {"like_count": 2}, others, env, "7d")
+assert r["outcome"] == "moved" and r["value"] == 2 and r["comparison_median"] == 0 and r["comparison_n"] == 3
+r0 = hyp.evaluate(Hl, {"like_count": 0}, others, env, "7d")
+assert r0["outcome"] == "did_not_move"
+assert hyp.evaluate(Hl, {"like_count": 5}, [{"like_count": 0}], env, "7d")["outcome"] == "no_comparison"
+assert hyp.evaluate({**Hl, "watch": None}, {}, others, env, "7d")["outcome"] == "unreadable"
+assert hyp.evaluate(None, {}, others, env, "7d") is None
+assert hyp.evaluate({**Hl, "watch": "replies"}, {"reply_count": 1, "like_count": 0}, others, env, "7d")["outcome"] == "moved"
+print("18. 看的是測試指定的那個數字,不是總分;比的是同一檢查點、沒測這個假設的貼文的中位數 ✅")
+
+for x in (r, r0):
+    line = hyp.result_line(x).lower()
+    assert "wrong" not in line and "fail" not in line, line
+    assert "0 followers" in line, line
+assert "signal, not proof" in hyp.result_line(r)
+assert "describes those conditions, not the idea" in hyp.result_line(r0)
+print("19. 結果只說「動了 / 在這些條件下沒動」,附上發文環境;沒有對錯 ✅")
+
+# history 讀比較對象:排除測同一個假設的貼文,也排除自己
+modiqo_play.HISTORY_PATH.write_text("")
+for pid, hid, likes in (("p1", None, 0), ("p2", "hyp-L", 9), ("p3", "hyp-other", 1), ("self", None, 7)):
+    modiqo_play.capture_failure("Fluffy roommate", "bluesky", "t", "x", analysis={}, checkpoint="7d",
+        metrics={"post_id": pid, "like_count": likes}, trace={"post_id": pid, "tests_hypothesis_id": hid})
+got = sorted(m["like_count"] for m in modiqo_play.readings_without("bluesky", "7d", "hyp-L", {"self"}))
+assert got == [0, 1], got
+print("20. 比較對象排除「也在測這個假設的」和「這篇自己」✅")
+
+# 從頭到尾:一篇測了假設的貼文,7d 分析時要讀出結果並告訴顧問
+reasoning.record("rsn-L", post_id="p0", checkpoint="7d", product="Fluffy roommate", channel="bluesky",
+                 mode="hypothesis", steps=[], outcome="picked", result_text="", hypothesis=Hl)
+modiqo_play.capture_failure("Fluffy roommate", "bluesky", "t", "x", analysis={}, checkpoint="7d",
+    metrics={"post_id": "p4", "like_count": 0}, trace={"post_id": "p4"})
+pipeline._pull_checkpoint_metrics = lambda entry, cp: {"post_id": "tester", "like_count": 3,
+    "repost_count": 0, "reply_count": 0, "bookmark_count": 0, "engagement_score": 3.0}
+prompts = fake({d._MODEL_A: REAL["llama_question"], d._MODEL_B: REAL["mistral_two"],
+                d._JUDGE_MODEL: "PICK: A\nREASON: r"})
+pipeline.synthesize_strategy = d.synthesize_strategy
+tester = {"post_id": "tester", "product": "Fluffy roommate", "channel": "bluesky",
+          "final_text": "Ever wonder why?", "tests_hypothesis_id": "hyp-L", "environment": env}
+_, a_res, strat = pipeline._pull_and_analyze(tester, "7d")
+assert a_res.hypothesis_result["outcome"] == "moved" and a_res.hypothesis_result["value"] == 3
+assert "RESULT OF THE TEST THIS POST WAS RUNNING" in prompts[0][1] and "it moved" in prompts[0][1]
+assert pipeline._trace_for(tester, strat, hypothesis_result=a_res.hypothesis_result)["hypothesis_result"]["outcome"] == "moved"
+assert a_res.as_dict()["hypothesis_result"]["hypothesis_id"] == "hyp-L"
+_, plain, _ = pipeline._pull_and_analyze({**tester, "tests_hypothesis_id": None}, "7d")
+assert plain.hypothesis_result is None
+print("21. 從頭到尾:測了假設的貼文,7d 分析讀出結果、寫進分析和 history、顧問看得到;沒測的不多出東西 ✅")
+
+app = (Path(__file__).resolve().parent.parent / "streamlit_app.py").read_text()
+import contentmaster.analysis as an
+assert "hyp.result_line(analysis['hypothesis_result'])" in app
+assert "result_line(result.hypothesis_result)" in inspect.getsource(an.confirm_with_human)
+print("22. 兩個審核介面都用同一句 result_line 顯示結果 ✅")
 print("\nall passed")

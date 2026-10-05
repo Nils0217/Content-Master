@@ -821,6 +821,23 @@ def _pull_and_analyze(entry: dict[str, Any], checkpoint: str) -> tuple[dict[str,
     metrics = _pull_checkpoint_metrics(entry, checkpoint)
     analysis = analyze_performance(product_name, channel, metrics.get("engagement_score", 0.0),
                                     checkpoint=checkpoint)
+    # 2026-10-05: if this post was testing a hypothesis, read the number
+    # that test said to watch before anything else — the advisors are told
+    # the result, and both review surfaces show it.
+    tested = entry.get("tests_hypothesis_id")
+    if tested:
+        from . import hypothesis as hyp, reasoning
+        from .modiqo_play import readings_without
+
+        analysis.hypothesis_result = hyp.evaluate(
+            reasoning.find_hypothesis(tested), metrics,
+            readings_without(channel, checkpoint, tested, exclude_post_ids={entry.get("post_id")}),
+            entry.get("environment"), checkpoint)
+        if analysis.hypothesis_result is None:
+            audit.log_event("analysis", "tested_hypothesis.missing", post_id=entry.get("post_id"),
+                             hypothesis_id=tested)
+            print(f"[note] {entry.get('post_id')} says it tested {tested}, but that hypothesis is "
+                  "not in plays/_reasoning.jsonl — its result cannot be read.")
     index = topic_index.load_index(product_name) or {}
     strategy = synthesize_strategy(
         product_name, channel, analysis, target=topic_index.load_target(product_name),
@@ -832,7 +849,8 @@ def _pull_and_analyze(entry: dict[str, Any], checkpoint: str) -> tuple[dict[str,
 
 
 def _trace_for(entry: dict[str, Any], strategy: Strategy | None = None,
-               hypothesis: dict[str, Any] | None = None, reasoning_id: str = "") -> dict[str, Any]:
+               hypothesis: dict[str, Any] | None = None, reasoning_id: str = "",
+               hypothesis_result: dict[str, Any] | None = None) -> dict[str, Any]:
     """What history needs to trace a row back (2026-10-04): which post, the
     hypothesis it was testing and the conditions it went out under, and
     the hypothesis this analysis chose for the next post with the
@@ -841,6 +859,7 @@ def _trace_for(entry: dict[str, Any], strategy: Strategy | None = None,
         "post_id": entry.get("post_id"),
         "tests_hypothesis_id": entry.get("tests_hypothesis_id"),
         "environment": entry.get("environment"),
+        "hypothesis_result": hypothesis_result,
         "next_hypothesis": strategy.hypothesis if strategy else hypothesis,
         "reasoning_id": strategy.reasoning_id if strategy else reasoning_id,
     }
@@ -924,7 +943,8 @@ def _run_review_terminal(entry: dict[str, Any], checkpoint: str) -> None:
     analysis = confirm_with_human(analysis, strategy.text, hypothesis=strategy.hypothesis,
                                   reasoning_id=strategy.reasoning_id)
     _finalize_analysis(entry, checkpoint, metrics, analysis, strategy.text,
-                       trace=_trace_for(entry, strategy))
+                       trace=_trace_for(entry, strategy,
+                                        hypothesis_result=analysis.hypothesis_result))
 
 
 def _run_review_streamlit(entry: dict[str, Any], checkpoint: str) -> None:
@@ -969,7 +989,8 @@ def apply_analysis_decision(queue_entry: dict[str, Any], confirmed: bool, note: 
     next_strategy = queue_entry["recommendation"]
     _finalize_analysis(entry, checkpoint, metrics, analysis, next_strategy,
                        trace=_trace_for(entry, hypothesis=queue_entry.get("hypothesis"),
-                                        reasoning_id=queue_entry.get("reasoning_id", "")))
+                                        reasoning_id=queue_entry.get("reasoning_id", ""),
+                                        hypothesis_result=analysis.hypothesis_result))
     analysis_queue.update_entry(
         queue_entry["post_id"], checkpoint,
         status="confirmed" if confirmed else "disagreed", human_note=note,

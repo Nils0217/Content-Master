@@ -227,6 +227,34 @@ def comparable_history(channel: str, checkpoint: str,
     return rows
 
 
+def readings_without(channel: str, checkpoint: str, hypothesis_id: str,
+                     exclude_post_ids: set[str] | None = None) -> list[dict[str, Any]]:
+    """Raw counts for posts at this checkpoint that did NOT test
+    `hypothesis_id` — what a test's watched number is set beside
+    (hypothesis.evaluate). Same channel/tier filtering as
+    comparable_history(); one reading per post, the latest."""
+    if not HISTORY_PATH.exists():
+        return []
+    exclude = exclude_post_ids or set()
+    by_post: dict[str, dict[str, Any]] = {}
+    with HISTORY_PATH.open() as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            if record.get("channel") != channel or record.get("checkpoint") != checkpoint:
+                continue
+            if record.get("tests_hypothesis_id") == hypothesis_id:
+                continue
+            metrics = record.get("metrics") or {}
+            pid = record.get("post_id") or metrics.get("post_id")
+            if "like_count" not in metrics or not pid or pid in exclude:
+                continue
+            by_post[pid] = metrics
+    return list(by_post.values())
+
+
 def find_best_prior(
     product_name: str, channel: str, prefer: tuple[str, ...] = CHECKPOINT_MATURITY_ORDER,
 ) -> dict[str, Any] | None:

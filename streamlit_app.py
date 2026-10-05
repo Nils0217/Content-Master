@@ -444,6 +444,9 @@ with tab_analysis:
             ):
                 st.write(analysis["prior_suggestion"])
         st.caption(analysis.get("evidence", ""))
+        # 2026-10-05: shared wording with the terminal (hypothesis.result_line).
+        if analysis.get("hypothesis_result"):
+            st.markdown(f"**Test result:** {hyp.result_line(analysis['hypothesis_result'])}")
         if analysis.get("external_signal"):
             st.caption(analysis["external_signal"])
         if analysis.get("trending_context"):

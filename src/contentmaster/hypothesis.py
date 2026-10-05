@@ -178,3 +178,76 @@ def review_view(h: dict[str, Any] | None, row: dict[str, Any] | None) -> dict[st
             "no_response": "Neither advisor responded.",
         }.get(row.get("outcome", ""), "")
     return view
+
+
+# --- closing the loop (2026-10-05) -----------------------------------------
+#
+# A hypothesis was proposed, a post was written to test it — and then the
+# checkpoint analysis compared that post's total score with a baseline and
+# never asked about the one number the test said to watch. The test had no
+# ending. This is the ending: the watched number on the testing post, set
+# beside the same number on posts at the same checkpoint that did NOT test
+# it, with the conditions the post went out under.
+#
+# Never "right" or "wrong". "moved" or "did not move under these
+# conditions" — and with one testing post it is a signal, not proof.
+
+_COUNT_FIELD = {"likes": "like_count", "reposts": "repost_count",
+                "replies": "reply_count", "bookmarks": "bookmark_count"}
+
+# Fewer comparison posts than this and there is nothing to set the result
+# beside — reported as such rather than compared against one stray post.
+MIN_COMPARISON_POSTS = 2
+
+
+def evaluate(h: dict[str, Any] | None, metrics: dict[str, Any],
+             comparison: list[dict[str, Any]], environment: dict[str, Any] | None,
+             checkpoint: str) -> dict[str, Any] | None:
+    """The result of a test, or None when the post was not testing anything.
+
+    `comparison` is raw count dicts for posts at the same checkpoint that
+    did not test this hypothesis (modiqo_play.readings_without).
+    """
+    if not h:
+        return None
+    watch = h.get("watch")
+    result: dict[str, Any] = {
+        "hypothesis_id": h.get("id"), "test": h.get("test", ""), "watch": watch,
+        "checkpoint": checkpoint, "environment": environment or {},
+        "value": None, "comparison_n": len(comparison), "comparison_median": None,
+    }
+    if not watch or watch not in _COUNT_FIELD:
+        result["outcome"] = "unreadable"
+        return result
+    field = _COUNT_FIELD[watch]
+    result["value"] = int(metrics.get(field) or 0)
+    others = sorted(int(c.get(field) or 0) for c in comparison)
+    if len(others) < MIN_COMPARISON_POSTS:
+        result["outcome"] = "no_comparison"
+        return result
+    mid = len(others) // 2
+    median = others[mid] if len(others) % 2 else (others[mid - 1] + others[mid]) / 2
+    result["comparison_median"] = median
+    result["outcome"] = "moved" if result["value"] > median else "did_not_move"
+    return result
+
+
+def result_line(r: dict[str, Any] | None) -> str:
+    """One plain line a reviewer and the advisors both read."""
+    if not r:
+        return ""
+    head = f"Last test — {r.get('test', '')}. "
+    conditions = describe_environment(r.get("environment"))
+    outcome = r.get("outcome")
+    if outcome == "unreadable":
+        return head + "It named no number this system can read, so there is nothing to check."
+    watched = f"{r['watch']}: {r['value']} at {r['checkpoint']}"
+    if outcome == "no_comparison":
+        return (head + f"Watched {watched}. Fewer than {MIN_COMPARISON_POSTS} other posts at "
+                f"this checkpoint to set it beside — no reading yet. Conditions: {conditions}.")
+    beside = f"median {r['comparison_median']:g} across {r['comparison_n']} posts that did not test it"
+    if outcome == "moved":
+        return (head + f"Watched {watched} vs {beside} — it moved, under: {conditions}. "
+                "One post is a signal, not proof.")
+    return (head + f"Watched {watched} vs {beside} — it did not move under: {conditions}. "
+            "That describes those conditions, not the idea.")
