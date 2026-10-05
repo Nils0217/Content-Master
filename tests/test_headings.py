@@ -386,4 +386,46 @@ if pandoc_available() and DOC_PATH.exists():
     assert "Monitoring for behavioral or health changes" in maint["brief"], maint
     print("36. 真實文件:每個摘要都在上限內,第 12 節的七個條目都在 ✅")
 
+# --- 整節內容都在表格裡（2026-09-30）---
+# fixture 是 pandoc 對真實文件的原樣輸出,不是手打的。原本的摘要是兩個欄位標題
+# 黏在一起,讀不通;改成「欄位標題: 項目, 項目 / 欄位標題: 項目, 項目」。
+REAL_TABLE = '**Comparing lifestyle risks**\n\n  ------------------------------------------------------------------------ ----------------------------------------------------\n  Increased risks associated with living strictly indoors                  **Increased risks associated with outdoor access**\n  Lower urinary tract diseases (idiopathic and calcium oxalate crystals)   Infectious diseases (FeLV, FIV, rabies, parasites)\n  Hyperthyroidism                                                          Vehicular accidents\n  Obesity                                                                  Trauma (falls)\n  Diabetes                                                                 Trauma (fights) (other cats, other animals)\n  Dental odontoclastic resorptive lesions                                  Getting lost\n  Boredom                                                                  Theft\n  Household hazards (burns, poison exposure, falls)                        Poisoning\n  Inactivity, decreased fitness                                            Pregnancy\n  Problem behaviours (spraying, scratching)                                \n  Behaviour problems (obsessive behaviours)                                \n  Skin problems (atopic dermatitis or acral lick dermatitis)               \n  ------------------------------------------------------------------------ ----------------------------------------------------\n\n' + "**Next Section**\n\nThis one has a paragraph of its own so it is not a group.\n"
+rt = [x for x in extract_doc_headings(REAL_TABLE) if x["topic"] == "Comparing lifestyle risks"][0]["brief"]
+assert rt.startswith("Increased risks associated with living strictly indoors: Lower urinary"), rt
+assert " / Increased risks associated with outdoor access: Infectious diseases" in rt, rt
+assert "Hyperthyroidism" in rt and "Vehicular accidents" in rt, rt
+assert "strictly indoors Increased risks" not in rt, rt   # 兩個標題黏在一起的舊症狀
+assert len(rt) <= MAX_BRIEF_CHARS, len(rt)
+assert "*" not in rt and "---" not in rt, rt
+print("37. 表格章節的摘要按欄位分開,每欄帶自己的項目,兩欄都在上限內 ✅")
+
+PIPE = """**Comparing things**
+
+| Pros | Cons |
+|------|------|
+| Quiet companion | Sheds everywhere |
+| Low maintenance | Knocks things over |
+
+**Next Section**
+
+This one has a paragraph of its own so it is not a group.
+"""
+pb = extract_doc_headings(PIPE, min_brief=10)[0]["brief"]
+assert pb == "Pros: Quiet companion, Low maintenance / Cons: Sheds everywhere, Knocks things over", pb
+print("38. pipe 表格（| a | b |）也按欄位分開 ✅")
+
+DECLARED_TABLE = """# Comparing things
+
+| Pros | Cons |
+|------|------|
+| Quiet companion | Sheds everywhere |
+
+# Next Section
+
+This one has a paragraph of its own so it is not a group.
+"""
+db = extract_doc_headings(DECLARED_TABLE, min_brief=10)[0]
+assert db["brief"] == "Pros: Quiet companion / Cons: Sheds everywhere", db
+print("39. 文件有宣告 heading 時（第 1 層）,表格章節一樣按欄位摘要 ✅")
+
 print("\nall passed")

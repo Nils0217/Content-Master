@@ -526,9 +526,89 @@ def _with_list(brief: str, raw: list[str], start: int, stop: int) -> str:
 
 
 def _is_prose(raw: str, min_brief: int) -> bool:
-    if raw[:1].isspace() or _IMAGE_LINE.match(raw.strip()):
-        return False
+    if raw[:1].isspace() or _IMAGE_LINE.match(raw.strip()) or raw.startswith("|"):
+        return False  # indented (a simple-table cell), an image, or a pipe-table row
     return len(_clean_brief(raw)) >= min_brief
+
+
+# A simple-table rule row: runs of dashes separated by spaces, one run per
+# column. pandoc emits these for tables in RTF/Word sources.
+_TABLE_RULE = re.compile(r"^\s*-{3,}(?:\s+-{3,})*\s*$")
+# A pipe-table separator row: |---|:---:|
+_PIPE_RULE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-*:?\s*\|?\s*$")
+
+
+def _table_rows(lines: list[str]) -> list[list[str]]:
+    """The first table in `lines`, as rows of cleaned cells. [] if none.
+
+    Handles pipe tables and pandoc simple tables (headed or headerless). Grid
+    and multiline tables are not parsed — best effort, not a spec.
+    """
+    pipe = [ln for ln in lines if ln.strip().startswith("|")]
+    if pipe:
+        return [[_strip_markup(c) for c in ln.strip().strip("|").split("|")]
+                for ln in pipe if not _PIPE_RULE.match(ln)]
+
+    rule = next((k for k, ln in enumerate(lines) if _TABLE_RULE.match(ln)), None)
+    if rule is None:
+        return []
+    starts = [m.start() for m in re.finditer(r"-+", lines[rule])]
+    first = rule + 1
+    if rule > 0 and lines[rule - 1].strip():
+        first = rule - 1  # a headed table: the header row sits above the rule
+    rows = []
+    for k in range(first, len(lines)):
+        ln = lines[k]
+        if _TABLE_RULE.match(ln):
+            if k > rule:
+                break  # the closing rule
+            continue
+        if not ln.strip():
+            if rows:
+                break
+            continue
+        ends = starts[1:] + [len(ln)]
+        rows.append([_strip_markup(ln[a:b]) for a, b in zip(starts, ends)])
+    return rows
+
+
+def _table_brief(raw: list[str], start: int, stop: int) -> str:
+    """A section whose material is a table, summarised column by column:
+    "Indoors: A, B, C, … / Outdoors: D, E, …".
+
+    The first row is read as the column labels — true of the whitepaper's
+    headerless table, a guess for others. Each column gets an equal share of
+    MAX_BRIEF_CHARS so a long first column cannot push the second one out; a
+    column that does not fit ends in "…" rather than implying it is complete.
+    Before this, "Comparing lifestyle risks" summarised itself as its two
+    column labels run together, naming none of the risks.
+    """
+    rows = _table_rows(raw[start:stop])
+    if len(rows) < 2:
+        return ""
+    labels, body = rows[0], rows[1:]
+    columns = [(label, [r[k] for r in body if k < len(r) and r[k]])
+               for k, label in enumerate(labels)]
+    columns = [(label, items) for label, items in columns if label or items]
+    if not any(items for _, items in columns):
+        return ""
+    sep = " / "
+    budget = (MAX_BRIEF_CHARS - len(sep) * (len(columns) - 1)) // len(columns)
+    parts = []
+    for label, items in columns:
+        text = label + ":" if label else ""
+        shown = 0
+        for n, item in enumerate(items):
+            piece = (" " if n == 0 else ", ") + item
+            room_for_more = 0 if n == len(items) - 1 else len(", …")
+            if len(text) + len(piece) + room_for_more > budget:
+                break
+            text += piece
+            shown += 1
+        if shown < len(items):
+            text += " …" if shown == 0 else ", …"
+        parts.append(text.strip())
+    return sep.join(parts)
 
 
 # A markdown ATX heading: "## Pricing Tiers". This is what pandoc emits when a
@@ -604,6 +684,9 @@ def extract_atx_headings(md: str, min_brief: int = 40) -> list[dict[str, str]]:
             if _is_prose(raw[j], min_brief):
                 own[i] = _brief_limit(_with_list(_clean_brief(raw[j]), raw, j + 1, stop))
                 break
+        else:
+            if table := _table_brief(raw, i + 1, stop):
+                own[i] = table
 
     headings: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -699,6 +782,9 @@ def _extract_by_position(
             # Nothing unindented — the section's material lives in a table.
             # "Comparing lifestyle risks" is entirely a table, so without this
             # it looked like a group and borrowed the next section's name.
+            if table := _table_brief(raw, i + 1, stop):
+                own[i] = table
+                continue
             for j in range(i + 1, stop):
                 cell = _clean_brief(raw[j])
                 if len(cell) >= min_brief:
