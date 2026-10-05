@@ -50,6 +50,7 @@ Review:   contentmaster review
 from __future__ import annotations
 
 import os
+import sys
 import requests
 from pathlib import Path
 from typing import Any
@@ -1310,7 +1311,10 @@ def launch_streamlit() -> None:
 
     app_path = settings.project_root / "streamlit_app.py"
     subprocess.Popen(
-        ["streamlit", "run", str(app_path)],
+        # sys.executable, not a bare "streamlit": that resolves on PATH and
+        # found a system-wide install whose Python has none of this
+        # project's packages (ModuleNotFoundError: atproto_client).
+        [sys.executable, "-m", "streamlit", "run", str(app_path)],
         cwd=str(settings.project_root),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
