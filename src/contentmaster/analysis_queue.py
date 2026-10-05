@@ -36,8 +36,20 @@ from .config import settings
 # history. Version 2 (2026-09-24): evidence-sufficiency gating, and
 # prior-suggestion effectiveness requiring the advice to have been
 # followed. Entries written before it claim conclusions the current logic
-# refuses to draw.
-ANALYSIS_SCHEMA = 2
+# refuses to draw. Version 3 (2026-10-04): with no baseline the result is a
+# hypothesis the judge picked and did not rewrite, and every model step is
+# kept in plays/_reasoning.jsonl. Entries before it hold a judge's
+# rewritten "final strategy" with the test dropped.
+ANALYSIS_SCHEMA = 3
+
+# Shown by both review surfaces and raised by the decision path, so the
+# three say the same thing. See .claude/skills/two-review-surfaces.
+STALE_REASON = (
+    "This analysis was made by an older version of the analysis step, whose output the "
+    "current one does not stand behind (it may draw a trend from one prior post, or show a "
+    "rewritten strategy instead of the hypothesis it was meant to test). Run "
+    "`contentmaster review` for this checkpoint to analyse it again, then decide on the new one."
+)
 
 QUEUE_PATH = settings.data_root / "plays" / "_analysis_review.jsonl"
 
@@ -53,6 +65,7 @@ def _key(post_id: str, checkpoint: str) -> str:
 def queue_analysis(
     post_id: str, checkpoint: str, entry: dict[str, Any],
     metrics: dict[str, Any], analysis: dict[str, Any], recommendation: str,
+    hypothesis: dict[str, Any] | None = None, reasoning_id: str = "",
 ) -> None:
     """Called once per (post, checkpoint), right after the eager pull +
     analyze + synthesize step finishes (see pipeline._pull_and_analyze).
@@ -64,6 +77,7 @@ def queue_analysis(
     record = {
         "post_id": post_id, "checkpoint": checkpoint, "entry": entry,
         "metrics": metrics, "analysis": analysis, "recommendation": recommendation,
+        "hypothesis": hypothesis, "reasoning_id": reasoning_id,
         "status": "pending", "human_note": "", "ts": _now_iso(),
         "analysis_schema": ANALYSIS_SCHEMA,
     }

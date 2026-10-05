@@ -31,11 +31,12 @@ def mk(hb):
 # 4. the advisors are asked a different question, not silenced
 cold = _proposal_prompt("P", "bluesky", mk(False))
 warm = _proposal_prompt("P", "bluesky", mk(True))
-assert "what result would show you were WRONG" in cold
+# 2026-10-04: 沒有「什麼代表錯」—— 沒動的數字代表當下環境不適合,不是點子錯
+assert "TEST:" in cold and "WATCH:" in cold and "WRONG" not in cold
 assert "do not describe any result as proven, improving or declining" in cold
 assert "Trend:" not in cold and "Real performance analysis" not in cold
-assert "Trend:" in warm and "what result would show you were WRONG" not in warm
-print("4. 沒基準線 -> 問假設與證偽條件;有基準線 -> 問調整 ✅")
+assert "Trend:" in warm and "TEST:" not in warm
+print("4. 沒基準線 -> 問要測什麼（TEST/WHY/WATCH）;有基準線 -> 問調整 ✅")
 print("   顧問沒有被關掉 —— 冷啟動的 8 篇仍然有方向")
 
 # 5. the gate reads the same constants as the win/lose gate

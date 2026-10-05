@@ -240,6 +240,14 @@ class Platform(ABC):
         substitute made-up numbers for it.
         """
 
+    def account_snapshot(self) -> dict[str, Any]:
+        """The account's size right now — {"followers", "following",
+        "posts"} — recorded with every post as part of the conditions it
+        went out under (pipeline._environment). Default: nothing known,
+        which is recorded as unknown rather than zero.
+        """
+        return {}
+
     def publish_video(self, text: str, video: bytes, video_alt: str = "") -> dict[str, Any]:
         """Post with a video attached. Default: not supported, which is a
         real answer rather than a silent text-only fallback — a video that

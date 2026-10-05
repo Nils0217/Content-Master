@@ -79,6 +79,7 @@ def capture_success(
     analysis: dict[str, Any] | None = None,
     checkpoint: str = "24h",
     evidence_used: str = "",
+    trace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist the winning (product, channel) -> text pattern, bumping a run counter.
 
@@ -117,7 +118,7 @@ def capture_success(
     path.write_text(json.dumps(play, indent=2, default=str))
     _append_history(product_name, channel, winning_text, metrics, reviewer_note, improvement_note,
                      analysis, play["runs"], checkpoint, outcome="success",
-                     evidence_used=evidence_used)
+                     evidence_used=evidence_used, trace=trace)
 
     _register_with_rote(product_name, channel, metrics)
     return play
@@ -135,6 +136,7 @@ def _append_history(
     checkpoint: str,
     outcome: str,
     evidence_used: str = "",
+    trace: dict[str, Any] | None = None,
 ) -> None:
     """Append-only — never overwritten, unlike plays/*.json. This is what
     makes real cross-run analysis possible at all. One row per
@@ -171,6 +173,12 @@ def _append_history(
         # question it previously did not ask, and so answered wrongly by
         # assuming the answer was always yes.
         "evidence_used": evidence_used,
+        # 2026-10-04: enough to trace a row without matching timestamps —
+        # post_id, the hypothesis this post was testing and the conditions
+        # it went out under, the hypothesis this analysis chose for the
+        # NEXT post, and the reasoning_id of every model step behind it
+        # (plays/_reasoning.jsonl). See pipeline._trace_for().
+        **(trace or {}),
     }
     with HISTORY_PATH.open("a") as fh:
         fh.write(json.dumps(record, default=str) + "\n")
@@ -274,6 +282,9 @@ def find_best_prior(
                 "improvement_note": record.get("improvement_note", ""),
                 "human_feedback": analysis.get("human_note") or "",
                 "checkpoint": tier,
+                # 2026-10-04: the structured test, so drafting can write a
+                # post that tests it rather than reading it as advice.
+                "hypothesis": record.get("next_hypothesis"),
             }
     return None
 
@@ -288,6 +299,7 @@ def capture_failure(
     checkpoint: str | None = None,
     metrics: dict[str, Any] | None = None,
     evidence_used: str = "",
+    trace: dict[str, Any] | None = None,
 ) -> None:
     """Failed / rejected runs are logged separately as improvement samples
     (white paper §3, step 7) rather than polluting the muscle-memory file.
@@ -317,6 +329,7 @@ def capture_failure(
         "improvement_note": improvement_note,
         "analysis": analysis,
         "checkpoint": checkpoint,
+        **(trace or {}),
     }
     with fails_path.open("a") as fh:
         fh.write(json.dumps(record, default=str) + "\n")
@@ -324,7 +337,7 @@ def capture_failure(
     if checkpoint:
         _append_history(product_name, channel, text, metrics or {}, "", improvement_note,
                          analysis, 0, checkpoint, outcome="failure",
-                         evidence_used=evidence_used)
+                         evidence_used=evidence_used, trace=trace)
 
 
 def _register_with_rote(product_name: str, channel: str, metrics: dict[str, Any]) -> None:

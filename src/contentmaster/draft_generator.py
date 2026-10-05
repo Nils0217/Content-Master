@@ -101,7 +101,7 @@ _BLOCK_SEPARATOR = "---"
 # numbering and stray dashes are how models decorate lists; the field name
 # is the part that matters.
 _FIELD_PATTERN = re.compile(
-    r"^[\s\-*>#\d.)]*(POST|TOPIC|WHY|IS|TESTING|EVIDENCE-USED|EVIDENCE-AGAINST)\s*:\s*(.*)$",
+    r"^[\s\-*>#\d.)]*(POST|TOPIC|WHY|IS|TESTING|EVIDENCE-USED|EVIDENCE-AGAINST|HYPOTHESIS)\s*:\s*(.*)$",
     re.IGNORECASE)
 
 
@@ -180,6 +180,26 @@ def _match_topic(name: str, topics: list[dict[str, Any]]) -> dict[str, Any] | No
         if wanted.startswith(actual) or actual.startswith(wanted):
             return t
     return None
+
+def trends_as_of() -> str | None:
+    """The last day the trend seed covers, e.g. "2026-09-13", or None.
+    Recorded with each post (pipeline._environment) so a result can be read
+    against how stale the trend data was when the post was written."""
+    db_path = settings.project_root / "warehouse" / "local.duckdb"
+    if not db_path.exists():
+        return None
+    try:
+        import duckdb
+
+        con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            row = con.execute("select max(day) from stg_google_trends_timeline").fetchone()
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001 — context only
+        return None
+    return str(row[0])[:10] if row and row[0] else None
+
 
 def _trending_for_prompt() -> str:
     """Current search interest, stated with the date it was captured.
@@ -278,6 +298,25 @@ def _subject_description(name: str, category: str) -> str:
             "describes something being sold, the post can sell it; if it is a guide or an "
             "explanation, the post should be useful rather than promotional. Do not invent a "
             "product, a purchase, or a problem-it-solves that the document does not contain.")
+
+
+def _hypothesis_instruction(h: dict[str, Any] | None, require_field: bool) -> str:
+    """The test the last analysis chose (2026-10-04). Before this the
+    analysis step's hypothesis was stored and never shown to the model
+    writing the next post, so nothing was ever tested against it."""
+    if not h or not h.get("test"):
+        return ""
+    from .hypothesis import render
+
+    out = ("HYPOTHESIS TO TEST. With no performance baseline yet, the last analysis chose one "
+           f"thing to try:\n{render(h)}\n")
+    if require_field:
+        out += ("At least one of these posts must make exactly that change and nothing else, "
+                "so its result can be read against it. Mark that post `HYPOTHESIS: yes` and "
+                "every other post `HYPOTHESIS: no`.\n\n")
+    else:
+        out += "Make exactly that change and nothing else.\n\n"
+    return out
 
 
 def _target_instruction(target: dict[str, Any] | None) -> str:
@@ -558,6 +597,8 @@ class DraftGenerator:
                 "write `none` on a post you intended as a control.\n\n"
             )
 
+        hypothesis = (prior or {}).get("hypothesis")
+        prompt += _hypothesis_instruction(hypothesis, require_field=True)
         prompt += "VOCABULARY. " + draft_labels.describe_for_prompt() + "\n\n"
         prompt += _target_instruction(target)
         prompt += (
@@ -573,7 +614,9 @@ class DraftGenerator:
             "be compared with anything later.\n"
             "EVIDENCE-USED: which evidence above you followed, or `none`\n"
             "EVIDENCE-AGAINST: which evidence you deliberately contradicted, or `none`\n"
-            "---\n\n"
+            + ("HYPOTHESIS: `yes` if this post makes the hypothesis change above, else `no`\n"
+               if hypothesis else "")
+            + "---\n\n"
             "No numbering, no commentary outside the fields."
         )
 
@@ -614,6 +657,8 @@ class DraftGenerator:
                 "test_axis": axis, "test_arm": arm,
                 "evidence_used": block.get("EVIDENCE-USED", ""),
                 "evidence_against": block.get("EVIDENCE-AGAINST", ""),
+                "tests_hypothesis_id": (hypothesis.get("id") if hypothesis and re.match(
+                    r"\W*yes\b", block.get("HYPOTHESIS", ""), re.IGNORECASE) else None),
             })
 
         if not drafts:
@@ -633,6 +678,15 @@ class DraftGenerator:
                   "group tests nothing about whether the current pattern still holds.")
             audit.log_event("draft_generator", "control_arm.short", required=controls,
                              supplied=supplied, batch=len(drafts))
+
+        # Same rule as the control arm: a required test nobody checks is a
+        # wish. Said here, not discovered at the 7d checkpoint.
+        if hypothesis and hypothesis.get("test") and not any(d["tests_hypothesis_id"] for d in drafts):
+            print(f"[note] The last analysis chose a hypothesis to test ({hypothesis['test']!r}), "
+                  "but none of these drafts said it tests it (HYPOTHESIS: yes). Approving them "
+                  "as they are leaves it untested.")
+            audit.log_event("draft_generator", "hypothesis.untested", hypothesis_id=hypothesis.get("id"),
+                             batch=len(drafts))
 
         # Fold the batch's labels into the vocabulary so the next run is
         # shown them — the registries were read but never written until
@@ -703,9 +757,13 @@ class DraftGenerator:
                 f"{m.get('repost_count', 0)} reposts, {m.get('reply_count', 0)} replies, "
                 f"{m.get('bookmark_count', 0)} bookmarks "
                 f"(engagement score {_score_of(m)}).\n"
-                f"An LLM review of that result suggested this specific improvement: "
-                f"\"{prior.get('improvement_note', '')}\"\n"
             )
+            if prior.get("hypothesis"):
+                # Same test the topic path is given — see _hypothesis_instruction.
+                prompt += _hypothesis_instruction(prior["hypothesis"], require_field=False)
+            else:
+                prompt += (f"An LLM review of that result suggested this specific improvement: "
+                           f"\"{prior.get('improvement_note', '')}\"\n")
             # 2026-09-16: see the matching comment in _llm_draft_posts_for_topics
             if prior.get("human_feedback"):
                 prompt += (
@@ -751,9 +809,12 @@ class DraftGenerator:
         if paired < n:
             print(f"[warn] Asked the model for {n} post(s), got {paired} usable line(s) — "
                   f"writing {paired} draft(s) rather than repeating one.")
+        # Every post here was told to make the hypothesis change, so every
+        # one is labelled as testing it.
+        tested = ((prior or {}).get("hypothesis") or {}).get("id")
         drafts = [
             {"id": f"draft-{uuid.uuid4().hex[:8]}", "channel": channel, "text": lines[i],
-             "status": "draft", "source": "context"}
+             "status": "draft", "source": "context", "tests_hypothesis_id": tested}
             for i in range(paired)
         ]
         return drafts or None

@@ -29,11 +29,12 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import requests
 
-from . import audit
+from . import audit, hypothesis as hyp, reasoning
 from .analysis import AnalysisResult
 
 _ENDPOINT = os.environ.get("LLM_IMPROVE_ENDPOINT", "http://localhost:11434/v1/chat/completions")
@@ -90,35 +91,50 @@ def _complete(model: str, prompt: str, timeout: int = 90) -> str | None:
         return None
 
 
+def _grounding(product_name: str, post_text: str, category: str,
+               topic_names: list[str] | None) -> str:
+    """What the account is and what it can write about.
+
+    2026-10-04. The advisors used to get the product name and nothing else,
+    so with no baseline their only material was the Google Trends list —
+    all eight 7d hypotheses chased "cat in the hat" or Romania, and one
+    called Fluffy roommate a cat *breed*. The drafting prompt already said
+    what the subject is (draft_generator._subject_description); this one
+    did not, which is the same idea living only where it was born.
+    """
+    from .draft_generator import _subject_description
+
+    out = _subject_description(product_name, category) + "\n\n"
+    if topic_names:
+        out += ("THE SOURCE DOCUMENT'S SECTIONS — what this account can write about, and "
+                "nothing else:\n" + "; ".join(topic_names) + "\n\n")
+    if post_text:
+        out += f"The post being reviewed said: \"{post_text}\"\n\n"
+    return out
+
+
 def _proposal_prompt(
     product_name: str, channel: str, analysis: AnalysisResult, target: dict[str, Any] | None = None,
+    post_text: str = "", category: str = "", topic_names: list[str] | None = None,
 ) -> str:
-    prompt = f"You're advising on the next marketing post for '{product_name}' on {channel}.\n\n"
+    prompt = f"You're advising on the next post for '{product_name}' on {channel}.\n\n"
+    prompt += _grounding(product_name, post_text, category, topic_names)
     if analysis.has_baseline:
         prompt += (f"Real performance analysis (not a guess): {analysis.evidence}\n"
                    f"Trend: {analysis.trend}.")
     else:
-        # 2026-09-24: a different question, not a silenced one.
-        #
-        # This prompt used to be the only one, asked whether or not there
-        # was anything to analyse. With one prior post the advisors were
-        # told "here is the real performance analysis" and given a delta
-        # computed from n=1, so they answered confidently about a trend
-        # that did not exist — and, in a real session, recommended chasing
-        # a meme ("cat in the hat trend") on that basis.
-        #
-        # Producing nothing instead would be worse: a baseline needs eight
-        # posts, so the system would have no direction during exactly the
-        # period it has to operate. docs/SCHEDULE.md Phase 10 already said
-        # what a failed gate should produce — a falsifiable hypothesis —
-        # and this is where that becomes real. The ask changes from "what
-        # do the numbers say to do" to "what is worth testing first, and
-        # how would we know it was wrong".
+        # 2026-09-24: a different question, not a silenced one. A baseline
+        # needs eight posts, so producing nothing here would leave the
+        # system with no direction during exactly the period it has to
+        # operate. The ask is "what is worth testing", not "what do the
+        # numbers say" — with one prior post the advisors used to be handed
+        # a delta computed from n=1 and answered confidently about a trend
+        # that did not exist.
         prompt += (
             f"{analysis.evidence}\n\n"
-            "There is no performance history to reason from yet, so do not describe any "
-            "result as proven, improving or declining, and do not infer anything from this "
-            "single post's score."
+            "There is no performance history yet, so do not describe any result as proven, "
+            "improving or declining, and do not infer anything from this single post's score. "
+            "You know nothing about who follows this account or where they are."
         )
     if analysis.human_note:
         prompt += f" A human reviewer added this note: {analysis.human_note}"
@@ -128,12 +144,8 @@ def _proposal_prompt(
         prompt += f"\n\n{analysis.trending_context}"
     region, audience = (target or {}).get("region"), (target or {}).get("audience")
     if region or audience:
-        # 2026-09-18: without this, a real session found the models citing
-        # the trending context's generic top regions (Romania/Indonesia/
-        # Peru, from Google Trends, unrelated to this product's actual
-        # market) as if they were meaningful targeting advice. This is the
-        # product's actual, deliberately chosen target, and takes priority
-        # over anything in the trending context above.
+        # 2026-09-18: without this, the models cited the trending context's
+        # generic top regions as if they were this product's market.
         parts = [p for p in (f"region: {region}" if region else "", f"audience: {audience}" if audience else "") if p]
         prompt += (
             f"\n\nThis product's actual target is {', '.join(parts)}. Prefer this over any "
@@ -144,25 +156,32 @@ def _proposal_prompt(
         prompt += (
             "\n\nIn 2-3 sentences, propose a specific, concrete strategy for the next post "
             "(what to change or keep, and why, based on the evidence above — not generic advice). "
+            "If the trending context above has a genuinely relevant term or angle, you may "
+            "reference it, but don't force one in if nothing fits. "
+            f"The name '{product_name}' is fixed — propose a content theme, angle, or wording "
+            "change, never a rename or rebrand. No preamble."
         )
     else:
+        # 2026-10-04: no "what would show you were WRONG". A change that does
+        # not move its number did not suit the conditions it went out under
+        # — the follower count, the day, the moment — which the system
+        # records at publish. It is not a verdict on the idea. And WATCH is
+        # limited to what the system can read: the first real run's
+        # falsifiers named ad clicks, bounce rate and regional engagement.
         prompt += (
-            "\n\nPropose ONE thing worth testing first, as a hypothesis. Two or three "
-            "sentences, in this shape:\n"
-            "- what to try, concretely enough that a writer could act on it\n"
-            "- why you think it might work\n"
-            "- what result would show you were WRONG — a specific outcome that would rule "
-            "this direction out\n"
-            "That last part is not optional. A direction nothing could disprove cannot be "
-            "tested, and testing it is the whole reason for the suggestion. "
+            "\n\nPropose ONE thing worth testing in the next post. Answer with exactly these "
+            "three lines and nothing else:\n"
+            "TEST: one change to how the post is written or what it is about, concrete enough "
+            "that a writer could act on it\n"
+            "WHY: one sentence on why it might suit this audience right now\n"
+            "WATCH: the one number that will show whether it suited — "
+            + ", ".join(hyp.METRICS[:-1]) + f" or {hyp.METRICS[-1]}. These four are the only "
+            "numbers this system can see.\n"
+            "There is no right or wrong outcome. If the number does not move, that means the "
+            "change did not suit the conditions at the time, not that the idea was bad.\n"
+            "A trend unrelated to what this account writes about is a distraction, not an "
+            f"opportunity. The name '{product_name}' is fixed — never propose a rename."
         )
-    prompt += (
-        "If the trending context above has a genuinely relevant term or angle, you may "
-        "reference it, but don't force one in if nothing fits — a trend unrelated to this "
-        "product is a distraction, not an opportunity. "
-        f"The product name and brand ('{product_name}') is fixed and not up for discussion — "
-        "propose a content theme, angle, or wording change, never a rename or rebrand. No preamble."
-    )
     return prompt
 
 
@@ -195,64 +214,146 @@ def _clean_synthesis(text: str | None) -> str | None:
     return cleaned
 
 
+@dataclass
+class Strategy:
+    """What one analysis produced for the next post.
+
+    `text` is what history stores as `improvement_note` and the review
+    queue shows. In hypothesis mode it is hypothesis.render() of the chosen
+    proposal — never a judge's rewrite of it. `reasoning_id` finds every
+    step that led here in plays/_reasoning.jsonl.
+    """
+    text: str
+    hypothesis: dict[str, Any] | None
+    reasoning_id: str
+
+
 def synthesize_strategy(
     product_name: str, channel: str, analysis: AnalysisResult, target: dict[str, Any] | None = None,
-) -> str:
-    """Returns the next round's content strategy. Never raises — any model
-    call failing falls back to a clearly-labeled note (same pattern as the
-    old improve.py), so a local-LLM hiccup never takes down the pipeline.
+    *, post_id: str | None = None, checkpoint: str | None = None, post_text: str = "",
+    category: str = "", topic_names: list[str] | None = None,
+) -> Strategy:
+    """The next round's direction. Never raises — a model call failing is
+    recorded and shown, so a local-LLM hiccup never takes down the pipeline.
 
-    `target` (2026-09-18, see topic_index.load_target): passed through to
-    _proposal_prompt so a product with a real target doesn't get advice
-    grounded in the trending context's generic top regions instead.
+    Every model call — prompt, raw reply, what was parsed — is recorded in
+    plays/_reasoning.jsonl under one reasoning_id, tied to the post and
+    checkpoint it analysed.
     """
-    prompt = _proposal_prompt(product_name, channel, analysis, target)
+    rid = reasoning.new_id()
+    log = dict(product=product_name, channel=channel, post_id=post_id, checkpoint=checkpoint,
+               reasoning_id=rid)
+    prompt = _proposal_prompt(product_name, channel, analysis, target, post_text=post_text,
+                              category=category, topic_names=topic_names)
+    steps: list[dict[str, Any]] = []
+    raw: dict[str, str | None] = {}
+    for role, model in (("A", _MODEL_A), ("B", _MODEL_B)):
+        raw[role] = _complete(model, prompt)
+        audit.log_event("discuss", "proposal", model=model, role=role, proposal=raw[role], **log)
+        steps.append({"step": "advisor", "role": role, "model": model, "prompt": prompt,
+                      "raw": raw[role]})
 
-    proposal_a = _complete(_MODEL_A, prompt)
-    audit.log_event("discuss", "proposal", model=_MODEL_A, product=product_name, channel=channel,
-                     proposal=proposal_a)
-    proposal_b = _complete(_MODEL_B, prompt)
-    audit.log_event("discuss", "proposal", model=_MODEL_B, product=product_name, channel=channel,
-                     proposal=proposal_b)
+    if analysis.has_baseline:
+        text, outcome = _evidence_strategy(product_name, channel, analysis, raw, steps, log)
+        h = None
+    else:
+        h, text, outcome = _hypothesis(product_name, channel, raw, steps, log)
 
-    proposals = [p for p in (proposal_a, proposal_b) if p]
+    reasoning.record(rid, post_id=post_id, checkpoint=checkpoint, product=product_name,
+                     channel=channel, mode="evidence" if analysis.has_baseline else "hypothesis",
+                     steps=steps, outcome=outcome, result_text=text, hypothesis=h)
+    return Strategy(text=text, hypothesis=h, reasoning_id=rid)
+
+
+def _unmerged(raw: dict[str, str | None]) -> str:
+    return "\n\n".join(f"Advisor {r}: {t}" for r, t in raw.items() if t)
+
+
+def _hypothesis(product_name: str, channel: str, raw: dict[str, str | None],
+                steps: list[dict[str, Any]], log: dict[str, Any],
+                ) -> tuple[dict[str, Any] | None, str, str]:
+    """Parse both proposals, let the judge pick one, return it unchanged."""
+    parsed = {}
+    for step in steps:
+        step["parsed"] = hyp.parse_hypothesis(step["raw"])
+        if step["parsed"]:
+            parsed[step["role"]] = {**step["parsed"], "model": step["model"]}
+
+    if not any(raw.values()):
+        audit.log_event("discuss", "fallback", note="no advisor responded", **log)
+        return None, f"[no hypothesis: neither {_MODEL_A} nor {_MODEL_B} responded]", "no_response"
+    if not parsed:
+        # Replied, but not in a shape we could read. Said, not swallowed:
+        # an empty parse and "nothing to say" must not look the same.
+        audit.log_event("discuss", "unparsed", **log)
+        print("[note] Neither advisor's reply had a TEST line — no hypothesis this round. "
+              "Both replies are kept in plays/_reasoning.jsonl.")
+        return None, _unmerged(raw), "none_usable"
+
+    if len(parsed) == 1 or not _JUDGE_ENABLED:
+        role = next(iter(parsed))
+        why = ("only one advisor gave a readable test" if len(parsed) == 1
+               else "judge disabled — first readable test used")
+        chosen = {**parsed[role], "picked": role, "pick_reason": why}
+        outcome = "only_one_usable" if len(parsed) == 1 else "judge_disabled"
+    else:
+        judge_prompt = (
+            f"Two advisors each proposed one test for the next post on the {channel} account "
+            f"'{product_name}'. There is no performance history yet.\n\n"
+            f"Advisor A:\n{hyp.render(parsed['A'])}\n\nAdvisor B:\n{hyp.render(parsed['B'])}\n\n"
+            "Pick the ONE test more worth running next: the one that changes a single clear "
+            "thing and stays within what the account writes about. Do not merge them and do "
+            "not rewrite them. Answer with exactly these two lines and nothing else:\n"
+            "PICK: A or B\nREASON: one sentence"
+        )
+        judge_raw = _complete(_JUDGE_MODEL, judge_prompt, timeout=180)
+        cleaned = _clean_synthesis(judge_raw)
+        pick, reason = hyp.parse_pick(cleaned)
+        steps.append({"step": "judge", "role": "judge", "model": _JUDGE_MODEL,
+                      "prompt": judge_prompt, "raw": judge_raw,
+                      "parsed": {"pick": pick, "reason": reason} if pick else None})
+        audit.log_event("discuss", "judged", model=_JUDGE_MODEL, pick=pick, reason=reason,
+                        raw=judge_raw, **log)
+        if pick:
+            chosen = {**parsed[pick], "picked": pick, "pick_reason": reason}
+            outcome = "picked"
+        else:
+            # Recorded as exactly that, so it is visible, and A is used
+            # rather than nothing — a test is still better than none.
+            chosen = {**parsed["A"], "picked": "A",
+                      "pick_reason": "the judge gave no readable pick — Advisor A used by default"}
+            outcome = "judge_unusable"
+
+    chosen["id"] = hyp.new_id()
+    return chosen, hyp.render(chosen), outcome
+
+
+def _evidence_strategy(product_name: str, channel: str, analysis: AnalysisResult,
+                       raw: dict[str, str | None], steps: list[dict[str, Any]],
+                       log: dict[str, Any]) -> tuple[str, str]:
+    proposals = [t for t in raw.values() if t]
     if not proposals:
         fallback = f"[discuss step unavailable: both {_MODEL_A} and {_MODEL_B} failed to respond]"
-        audit.log_event("discuss", "fallback", product=product_name, channel=channel, note=fallback)
-        return fallback
+        audit.log_event("discuss", "fallback", note=fallback, **log)
+        return fallback, "no_response"
     if len(proposals) == 1:
         note = proposals[0] + " (only one model responded — not cross-validated against a second.)"
-        audit.log_event("discuss", "single_model_only", product=product_name, channel=channel, note=note)
-        return note
-
+        audit.log_event("discuss", "single_model_only", note=note, **log)
+        return note, "single_model"
     if not _JUDGE_ENABLED:
-        # 2026-09-19 (code scan): this used to return a string opening
-        # with "[judge step disabled, see discuss.py _JUDGE_ENABLED ...]"
-        # and naming both model ids. That string is stored as the play's
-        # `improvement_note`, and modiqo_play.find_best_prior() feeds it
-        # straight into the NEXT run's draft prompt under the heading "An
-        # LLM review of that result suggested this specific improvement:"
-        # — so the generating model was being handed this project's
-        # internal config flag names and Ollama model ids as if they were
-        # marketing advice. The which-models/why-not-merged detail belongs
-        # in the audit trail, not in a prompt; "Advisor A / Advisor B" is
-        # already enough for a human to see these are two unmerged
-        # opinions rather than one verdict.
-        note = f"Advisor A: {proposal_a}\n\nAdvisor B: {proposal_b}"
-        audit.log_event("discuss", "judge_skipped", product=product_name, channel=channel,
-                         model_a=_MODEL_A, model_b=_MODEL_B, note=note)
-        return note
+        # Model ids stay out of this text: it is stored as the play's
+        # `improvement_note` and read back into prompts. "Advisor A / B" is
+        # enough for a human; the ids are in the audit trail.
+        note = _unmerged(raw)
+        audit.log_event("discuss", "judge_skipped", model_a=_MODEL_A, model_b=_MODEL_B,
+                        note=note, **log)
+        return note, "unmerged"
 
     judge_prompt = (
         f"Two advisors proposed strategies for the next '{product_name}' post on {channel}, "
         f"given this real performance evidence: {analysis.evidence}\n\n"
-        # Model ids deliberately absent: this prompt's answer becomes the
-        # `improvement_note`, which is fed verbatim into the next drafting
-        # prompt, and a judge that echoes "Advisor A (llama3.2:3b)" puts
-        # this project's Ollama config into what reads as marketing
-        # advice. The ids are in the audit log, which is where they belong.
-        f"Advisor A: {proposal_a}\n\n"
-        f"Advisor B: {proposal_b}\n\n"
+        f"Advisor A: {raw['A']}\n\n"
+        f"Advisor B: {raw['B']}\n\n"
         "In 2-3 sentences, give ONE final strategy: merge what they agree on, pick the "
         "stronger point where they disagree, and briefly say which it was (agreement or "
         "disagreement). "
@@ -260,14 +361,12 @@ def synthesize_strategy(
         "the final strategy must be a content theme, angle, or wording change, never a rename "
         "or rebrand. No preamble."
     )
-    synthesis = _clean_synthesis(_complete(_JUDGE_MODEL, judge_prompt))
-    audit.log_event("discuss", "synthesis", model=_JUDGE_MODEL, product=product_name, channel=channel,
-                     synthesis=synthesis)
+    judge_raw = _complete(_JUDGE_MODEL, judge_prompt)
+    synthesis = _clean_synthesis(judge_raw)
+    steps.append({"step": "judge", "role": "judge", "model": _JUDGE_MODEL, "prompt": judge_prompt,
+                  "raw": judge_raw, "parsed": synthesis})
+    audit.log_event("discuss", "synthesis", model=_JUDGE_MODEL, synthesis=synthesis, **log)
     if not synthesis:
-        # Same reasoning as the judge-disabled branch above: no bracketed
-        # internal status text, because this value is fed back into the
-        # next run's generation prompt.
-        audit.log_event("discuss", "synthesis_failed", product=product_name, channel=channel,
-                         model=_JUDGE_MODEL)
-        return f"Advisor A: {proposal_a}\n\nAdvisor B: {proposal_b}"
-    return synthesis
+        audit.log_event("discuss", "synthesis_failed", model=_JUDGE_MODEL, **log)
+        return _unmerged(raw), "unmerged"
+    return synthesis, "synthesized"

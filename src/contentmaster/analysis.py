@@ -433,7 +433,9 @@ def analyze_performance(
     return result
 
 
-def confirm_with_human(result: AnalysisResult, recommendation: str) -> AnalysisResult:
+def confirm_with_human(result: AnalysisResult, recommendation: str,
+                       hypothesis: dict[str, Any] | None = None,
+                       reasoning_id: str = "") -> AnalysisResult:
     """2026-09-16 — replaces the old `_confirm_with_human()` that ran
     *inside* analyze_performance(), before discuss.py's recommendation
     even existed. Now called from pipeline.py after both analyze_performance()
@@ -469,7 +471,23 @@ def confirm_with_human(result: AnalysisResult, recommendation: str) -> AnalysisR
     if result.trending_context:
         print(result.trending_context)
     print("-" * 60)
-    print(f"RECOMMENDATION for the next post: {recommendation}")
+    # 2026-10-04: one line, decided in hypothesis.review_view() so the
+    # browser shows the same thing. The full steps are kept, not printed.
+    from . import hypothesis as hyp, reasoning
+
+    view = hyp.review_view(hypothesis, reasoning.load(reasoning_id))
+    if view["headline"]:
+        print(f"NEXT POST TESTS  {view['headline']}")
+        print(f"  why            {view['why']}")
+        print(f"  chosen         {view['picked']}")
+        if view["other"]:
+            print(f"  not chosen     {view['other']}")
+    else:
+        if view["problem"]:
+            print(f"[no hypothesis] {view['problem']}")
+        print(f"RECOMMENDATION for the next post: {recommendation}")
+    if reasoning_id:
+        print(f"  every step     {reasoning_id} in plays/_reasoning.jsonl")
     print("=" * 60)
     # 2026-09-19 (code scan): every other prompt in this project rejects
     # anything it does not recognise rather than silently defaulting —

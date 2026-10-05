@@ -21,6 +21,10 @@
 -- inference alone would make it vanish rather than read null.
 -- analysis.py filters on `checkpoint` so a 24h reading is never compared
 -- against a 7d/30d one.
+-- 2026-10-04: post_id, the hypothesis this post tested
+-- (tests_hypothesis_id), the follower count it went out to, the
+-- hypothesis this analysis chose for the next post, and the reasoning_id
+-- that finds every model step behind it in stg_reasoning.
 select
     ts::timestamp as ts,
     product,
@@ -37,7 +41,14 @@ select
     evidence_used,
     run_number,
     checkpoint,
-    outcome
+    outcome,
+    post_id,
+    tests_hypothesis_id,
+    environment.followers as followers_at_publish,
+    next_hypothesis.id as next_hypothesis_id,
+    next_hypothesis.test as next_hypothesis_test,
+    next_hypothesis.watch as next_hypothesis_watch,
+    reasoning_id
 from read_json(
     '../plays/_history.jsonl',
     format = 'newline_delimited',
@@ -51,6 +62,11 @@ from read_json(
         improvement_note: 'VARCHAR',
         run_number: 'BIGINT',
         checkpoint: 'VARCHAR',
-        outcome: 'VARCHAR'
+        outcome: 'VARCHAR',
+        post_id: 'VARCHAR',
+        tests_hypothesis_id: 'VARCHAR',
+        environment: 'STRUCT(followers BIGINT)',
+        next_hypothesis: 'STRUCT(id VARCHAR, test VARCHAR, watch VARCHAR)',
+        reasoning_id: 'VARCHAR'
     }
 )

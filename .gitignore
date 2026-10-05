@@ -15,6 +15,7 @@ plays/_analysis_review.jsonl
 plays/_products.jsonl
 plays/_characteristics.jsonl
 plays/_test_axes.jsonl
+plays/_reasoning.jsonl
 metrics/*.jsonl
 .rocketride/
 pipelines/services-catalog-reference.json

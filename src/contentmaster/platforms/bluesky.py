@@ -101,6 +101,22 @@ class BlueskyPlatform(Platform):
             "display_name": getattr(profile, "display_name", None),
         }
 
+    def account_snapshot(self) -> dict[str, Any]:
+        client = self._get_client()
+        try:
+            profile = client.get_profile(actor=client.me.did)
+        except RateLimitExceededError as e:
+            raise PlatformRateLimitError("Bluesky rate limit hit while reading the profile.") from e
+        except NetworkError as e:
+            raise PlatformAPIError(f"Network error reaching Bluesky: {e}") from e
+        except AtProtocolError as e:
+            raise PlatformAPIError(f"Bluesky API error reading the profile: {e}") from e
+        return {
+            "followers": profile.followers_count,
+            "following": profile.follows_count,
+            "posts": profile.posts_count,
+        }
+
     def fetch_public_posts(self, query: str, limit: int = 5) -> list[Post]:
         """Search Bluesky's public post index (app.bsky.feed.searchPosts) —
         no following/timeline access needed, just an authenticated session.

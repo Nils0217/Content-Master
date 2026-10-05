@@ -39,7 +39,8 @@ from contentmaster.analysis import describe_effectiveness
 from contentmaster.draft_generator import DraftGenerator
 from contentmaster.modiqo_play import capture_failure
 from contentmaster.pipeline import apply_analysis_decision, step5_publish, step6_queue_for_review
-from contentmaster.pipeline import PublishFailed, StaleAnalysis
+from contentmaster.pipeline import LABEL_KEYS, PublishFailed, StaleAnalysis
+from contentmaster import hypothesis as hyp, reasoning
 from contentmaster.publish_guard import publish_blockers
 from contentmaster.platforms.registry import get_platform
 
@@ -304,9 +305,9 @@ with tab_drafts:
                 # carries an explicit `edited` flag instead.
                 edited=bool(entry.get("edited")) or st.session_state[text_key] != entry["text"],
                 reviewer_note=entry.get("reviewer_note", ""),
-                labels={k: entry.get(k) for k in
-                        ("topic_reason", "characteristics", "test_axis", "test_arm",
-                         "evidence_used", "evidence_against") if entry.get(k) is not None},
+                # One tuple shared with the terminal path (pipeline.LABEL_KEYS);
+                # this file kept its own copy until 2026-10-04.
+                labels={k: entry.get(k) for k in LABEL_KEYS if entry.get(k) is not None},
             )
             draft_queue.update_entry(draft_id, status="published", text=st.session_state[text_key])
             st.success(f"Published. {published.get('status')}")
@@ -448,7 +449,26 @@ with tab_analysis:
         if analysis.get("trending_context"):
             st.caption(analysis["trending_context"])
 
-        st.markdown(f"**Recommendation for the next post:** {recommendation}")
+        # 2026-10-04: one line, decided in hypothesis.review_view() so the
+        # terminal shows the same thing; every model step folded below it.
+        view = hyp.review_view(a_entry.get("hypothesis"), reasoning.load(a_entry.get("reasoning_id", "")))
+        if view["headline"]:
+            st.markdown(f"**Next post tests:** {view['headline']}")
+            st.caption(f"Why: {view['why']}")
+            st.caption(f"Chosen: {view['picked']}")
+            if view["other"]:
+                st.caption(f"Not chosen: {view['other']}")
+        else:
+            if view["problem"]:
+                st.warning(view["problem"])
+            st.markdown(f"**Recommendation for the next post:** {recommendation}")
+        if view["steps"]:
+            with st.expander(f"Every step ({a_entry.get('reasoning_id')})"):
+                for step in view["steps"]:
+                    st.markdown(f"**{step['label']}**")
+                    st.text(step["raw"])
+                    with st.popover("Prompt"):
+                        st.text(step["prompt"])
 
         # 2026-09-24: a queued analysis is stored as finished text, so a
         # fix to how verdicts are reached does not reach anything already
@@ -457,12 +477,7 @@ with tab_analysis:
         # decided on what you read, and recomputing behind that would
         # record something else.
         if analysis_queue.is_stale(a_entry):
-            st.warning(
-                "This analysis was produced before a change to how verdicts are reached — it "
-                "may state a trend drawn from a single prior post, or call a suggestion "
-                "ineffective without checking whether the post followed it. Run "
-                "`contentmaster review` to analyse it again, then decide on the new one."
-            )
+            st.warning(analysis_queue.STALE_REASON)
 
         col_c, col_d = st.columns(2)
 

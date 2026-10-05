@@ -68,7 +68,7 @@ from . import (
 from .analysis import AnalysisResult, analyze_performance, confirm_with_human
 from .cognee_client import CogneeClient
 from .config import CogneeSettings, settings
-from .discuss import synthesize_strategy
+from .discuss import Strategy, synthesize_strategy
 from .draft_generator import DraftGenerator
 from .human_loop import ReviewInterrupted, review_draft, review_image
 from .modiqo_play import capture_failure, capture_success, comparable_history, find_best_prior
@@ -573,7 +573,8 @@ def step5_publish(
             else:
                 result = platform.publish_post(final_text, image=image, image_alt=image_alt)
             post_ref = result.get("uri") or result.get("id")
-            published = {**draft, "text": final_text, "status": "published", "post_ref": post_ref}
+            published = {**draft, "text": final_text, "status": "published", "post_ref": post_ref,
+                         "has_image": bool(image), "has_video": bool(video)}
             audit.log_event("publish", f"{channel}.posted", draft_id=draft["id"], ref=post_ref,
                              has_image=bool(image), has_video=bool(video))
             return published
@@ -602,6 +603,32 @@ def step5_publish(
     return published
 
 
+def _environment(published: dict[str, Any], channel: str) -> dict[str, Any]:
+    """Follower count, local day and hour, media, and how old the trend
+    data was. Never raises — a failed account lookup records followers as
+    None rather than stopping a post that has already gone out."""
+    from datetime import datetime
+
+    from .draft_generator import trends_as_of
+
+    now = datetime.now().astimezone()
+    env: dict[str, Any] = {
+        "published_at": now.isoformat(timespec="seconds"),
+        "weekday": now.strftime("%a"), "local_hour": now.hour,
+        "has_image": bool(published.get("has_image")),
+        "has_video": bool(published.get("has_video")),
+        "trends_as_of": trends_as_of(),
+        "followers": None, "following": None, "posts": None,
+    }
+    if channel in PLATFORMS:
+        try:
+            env.update(get_platform(channel).account_snapshot())
+        except Exception as e:  # noqa: BLE001 — context only; the post is already live
+            audit.log_event("environment", "snapshot_failed", channel=channel,
+                             error_type=type(e).__name__, reason=str(e))
+    return env
+
+
 def step6_queue_for_review(product_name: str, channel: str, published: dict[str, Any],
                             edited: bool, reviewer_note: str,
                             labels: dict[str, Any] | None = None) -> None:
@@ -612,6 +639,11 @@ def step6_queue_for_review(product_name: str, channel: str, published: dict[str,
     later, from `contentmaster review` (see run_review() below), once a
     checkpoint's worth of real time has actually passed.
     """
+    # 2026-10-04: the conditions this post went out under, recorded here
+    # because both review surfaces publish through this one call. A result
+    # that did not move is read as "did not suit these conditions", which
+    # means nothing unless the conditions were written down.
+    labels = {**(labels or {}), "environment": _environment(published, channel)}
     try:
         tracking_review.queue_for_review(
             post_id=published["id"], product=product_name, channel=channel,
@@ -643,8 +675,11 @@ def step6_queue_for_review(product_name: str, channel: str, published: dict[str,
 # What the drafting model recorded about a draft, carried from generation
 # through the queue, publish and history so a later analysis can ask what
 # a post actually did rather than inferring it from timing.
-_LABEL_KEYS = ("topic_reason", "characteristics", "test_axis", "test_arm",
-               "evidence_used", "evidence_against")
+# What the drafting model recorded about a draft, carried from the draft to
+# the tracked post to history. Both review surfaces read this one tuple —
+# streamlit_app.py kept its own copy until 2026-10-04.
+LABEL_KEYS = ("topic_reason", "characteristics", "test_axis", "test_arm",
+              "evidence_used", "evidence_against", "tests_hypothesis_id")
 
 
 class StaleAnalysis(RuntimeError):
@@ -771,7 +806,7 @@ def _pull_checkpoint_metrics(entry: dict[str, Any], checkpoint: str) -> dict[str
     return metrics
 
 
-def _pull_and_analyze(entry: dict[str, Any], checkpoint: str) -> tuple[dict[str, Any], AnalysisResult, str]:
+def _pull_and_analyze(entry: dict[str, Any], checkpoint: str) -> tuple[dict[str, Any], AnalysisResult, Strategy]:
     """2026-09-18 (Phase 5 extended to `contentmaster review`, /grill-me
     design session, see docs/LOG.md) — the eager half of what used to be
     one synchronous step_checkpoint_analyze(): pull real (now-matured)
@@ -786,12 +821,34 @@ def _pull_and_analyze(entry: dict[str, Any], checkpoint: str) -> tuple[dict[str,
     metrics = _pull_checkpoint_metrics(entry, checkpoint)
     analysis = analyze_performance(product_name, channel, metrics.get("engagement_score", 0.0),
                                     checkpoint=checkpoint)
-    next_strategy = synthesize_strategy(product_name, channel, analysis, target=topic_index.load_target(product_name))
-    return metrics, analysis, next_strategy
+    index = topic_index.load_index(product_name) or {}
+    strategy = synthesize_strategy(
+        product_name, channel, analysis, target=topic_index.load_target(product_name),
+        post_id=entry.get("post_id"), checkpoint=checkpoint, post_text=entry.get("final_text", ""),
+        category=index.get("category", ""),
+        topic_names=[t["topic"] for t in index.get("topics") or [] if t.get("topic")],
+    )
+    return metrics, analysis, strategy
+
+
+def _trace_for(entry: dict[str, Any], strategy: Strategy | None = None,
+               hypothesis: dict[str, Any] | None = None, reasoning_id: str = "") -> dict[str, Any]:
+    """What history needs to trace a row back (2026-10-04): which post, the
+    hypothesis it was testing and the conditions it went out under, and
+    the hypothesis this analysis chose for the next post with the
+    reasoning_id of every model step behind it."""
+    return {
+        "post_id": entry.get("post_id"),
+        "tests_hypothesis_id": entry.get("tests_hypothesis_id"),
+        "environment": entry.get("environment"),
+        "next_hypothesis": strategy.hypothesis if strategy else hypothesis,
+        "reasoning_id": strategy.reasoning_id if strategy else reasoning_id,
+    }
 
 
 def _finalize_analysis(entry: dict[str, Any], checkpoint: str, metrics: dict[str, Any],
-                        analysis: AnalysisResult, next_strategy: str) -> None:
+                        analysis: AnalysisResult, next_strategy: str,
+                        trace: dict[str, Any] | None = None) -> None:
     """The decision-time half: shared by _run_review_terminal() (called
     right after its own confirm_with_human() call) and
     apply_analysis_decision() (called from Streamlit once the human
@@ -838,7 +895,7 @@ def _finalize_analysis(entry: dict[str, Any], checkpoint: str, metrics: dict[str
         play = capture_success(product_name, channel, final_text, metrics, reviewer_note,
                                 improvement_note=next_strategy, analysis=analysis.as_dict(),
                                 checkpoint=checkpoint,
-                                evidence_used=entry.get("evidence_used", ""))
+                                evidence_used=entry.get("evidence_used", ""), trace=trace)
         audit.log_event("modiqo", "success.captured", post_id=entry.get("post_id"),
                          product=product_name, channel=channel,
                          checkpoint=checkpoint, runs=play["runs"], state=verdict.state)
@@ -850,7 +907,7 @@ def _finalize_analysis(entry: dict[str, Any], checkpoint: str, metrics: dict[str
         capture_failure(product_name, channel, final_text, reason,
                          improvement_note=next_strategy, analysis=analysis.as_dict(),
                          checkpoint=checkpoint, metrics=metrics,
-                         evidence_used=entry.get("evidence_used", ""))
+                         evidence_used=entry.get("evidence_used", ""), trace=trace)
         audit.log_event("modiqo", "failure.captured", post_id=entry.get("post_id"),
                          product=product_name, channel=channel,
                          checkpoint=checkpoint, reason=reason, state=verdict.state)
@@ -863,9 +920,11 @@ def _run_review_terminal(entry: dict[str, Any], checkpoint: str) -> None:
     behavior: pull + analyze, block on confirm_with_human() right here in
     the terminal, then finalize immediately.
     """
-    metrics, analysis, next_strategy = _pull_and_analyze(entry, checkpoint)
-    analysis = confirm_with_human(analysis, next_strategy)
-    _finalize_analysis(entry, checkpoint, metrics, analysis, next_strategy)
+    metrics, analysis, strategy = _pull_and_analyze(entry, checkpoint)
+    analysis = confirm_with_human(analysis, strategy.text, hypothesis=strategy.hypothesis,
+                                  reasoning_id=strategy.reasoning_id)
+    _finalize_analysis(entry, checkpoint, metrics, analysis, strategy.text,
+                       trace=_trace_for(entry, strategy))
 
 
 def _run_review_streamlit(entry: dict[str, Any], checkpoint: str) -> None:
@@ -875,8 +934,10 @@ def _run_review_streamlit(entry: dict[str, Any], checkpoint: str) -> None:
     capture, no mark_checkpoint_done() until apply_analysis_decision()
     runs once the human actually decides.
     """
-    metrics, analysis, next_strategy = _pull_and_analyze(entry, checkpoint)
-    analysis_queue.queue_analysis(entry["post_id"], checkpoint, entry, metrics, analysis.as_dict(), next_strategy)
+    metrics, analysis, strategy = _pull_and_analyze(entry, checkpoint)
+    analysis_queue.queue_analysis(entry["post_id"], checkpoint, entry, metrics, analysis.as_dict(),
+                                  strategy.text, hypothesis=strategy.hypothesis,
+                                  reasoning_id=strategy.reasoning_id)
     audit.log_event("analysis_queue", "queued", post_id=entry["post_id"], checkpoint=checkpoint)
 
 
@@ -896,11 +957,8 @@ def apply_analysis_decision(queue_entry: dict[str, Any], confirmed: bool, note: 
         # different verdict than the one they read. Re-running `review`
         # re-queues it with current logic, and they decide on that.
         raise StaleAnalysis(
-            f"{queue_entry.get('post_id')} @ {queue_entry.get('checkpoint')} was analysed by an "
-            "older version whose conclusions the current logic does not stand behind "
-            "(it judged a suggestion effective or not without checking whether the post "
-            "followed it, and drew trends from a single prior post). Run "
-            "`contentmaster review` to analyse it again, then decide on that."
+            f"{queue_entry.get('post_id')} @ {queue_entry.get('checkpoint')}: "
+            + analysis_queue.STALE_REASON
         )
     analysis = AnalysisResult(**queue_entry["analysis"])
     analysis.human_confirmed = confirmed
@@ -909,7 +967,9 @@ def apply_analysis_decision(queue_entry: dict[str, Any], confirmed: bool, note: 
     checkpoint = queue_entry["checkpoint"]
     metrics = queue_entry["metrics"]
     next_strategy = queue_entry["recommendation"]
-    _finalize_analysis(entry, checkpoint, metrics, analysis, next_strategy)
+    _finalize_analysis(entry, checkpoint, metrics, analysis, next_strategy,
+                       trace=_trace_for(entry, hypothesis=queue_entry.get("hypothesis"),
+                                        reasoning_id=queue_entry.get("reasoning_id", "")))
     analysis_queue.update_entry(
         queue_entry["post_id"], checkpoint,
         status="confirmed" if confirmed else "disagreed", human_note=note,
@@ -1152,7 +1212,7 @@ def _run_terminal(product_name: str, channel: str, drafts: list[dict[str, Any]],
             published = step5_publish(draft, decision.final_text, image=image, image_alt=image_alt)
             step6_queue_for_review(product_name, channel, published,
                                     edited=decision.edited, reviewer_note=decision.reviewer_note,
-                                    labels={k: draft.get(k) for k in _LABEL_KEYS
+                                    labels={k: draft.get(k) for k in LABEL_KEYS
                                             if draft.get(k) is not None})
         except PublishFailed as e:
             # Nothing was sent. Treated as a stop for this draft rather
@@ -1230,9 +1290,7 @@ def _run_streamlit(product_name: str, channel: str, drafts: list[dict[str, Any]]
             draft["id"], product_name, channel, draft["text"],
             topic=draft.get("topic", ""), brief=draft.get("brief", ""), image_path=image_path,
             source=draft.get("source", "unknown"),
-            labels={k: draft.get(k) for k in
-                    ("topic_reason", "characteristics", "test_axis", "test_arm",
-                     "evidence_used", "evidence_against") if draft.get(k) is not None},
+            labels={k: draft.get(k) for k in LABEL_KEYS if draft.get(k) is not None},
         )
 
     audit.log_event("pipeline", "run.queued_for_streamlit", n=len(drafts))
@@ -1395,9 +1453,8 @@ def run_video(whitepaper_path: str, channel: str = "bluesky", product_name: str 
         print(f"{len(video.beats)} beat(s), {video.seconds:.1f}s, "
               f"{video.path.stat().st_size / 1e6:.1f} MB")
 
-        labels = {k: draft.get(k) for k in
-                  ("topic_reason", "test_axis", "test_arm", "evidence_used", "evidence_against")
-                  if draft.get(k) is not None}
+        labels = {k: draft.get(k) for k in LABEL_KEYS
+                  if k != "characteristics" and draft.get(k) is not None}
         # Recorded on every draft so "does video do better than a still?"
         # stays answerable later. It is a fact about the post, not a
         # verdict on it.
