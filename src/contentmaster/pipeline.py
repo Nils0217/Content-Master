@@ -1400,6 +1400,43 @@ def launch_streamlit() -> None:
     print("Opening the review page in your browser (http://localhost:8501 if it does not open on its own).")
 
 
+def _resolve_product_name(given: str | None, whitepaper_path: str) -> str:
+    """The product name for this run, shared by `run` and `video`.
+
+    A typed --product-name wins. Without one, the name a human last typed
+    for this same document is reused (product_registry.name_for_document);
+    only a document nobody has named falls back to its file name, and that
+    is said out loud. 2026-10-07: the file-name fallback alone turned
+    cat.rtfd into a product called "cat" beside its existing "Fluffy
+    roommate" history. The name stays a human decision — nothing here
+    invents one.
+
+    2026-09-20: describe_product() says whether the name has been used
+    before — four spellings of the same whitepaper once split the history
+    four ways.
+    """
+    from .product_registry import name_for_document
+
+    try:
+        source_hash = topic_index.file_hash(whitepaper_path)
+    except OSError:
+        source_hash = None  # unreadable path is reported properly further down
+    name = given
+    if not name:
+        name = name_for_document(whitepaper_path, source_hash)
+        if name:
+            print(f"[product] No --product-name given; using '{name}', the name you gave this "
+                  "document before.")
+        else:
+            name = Path(whitepaper_path).stem
+            print(f"[product] No --product-name given and this document has never been named — "
+                  f"using its file name '{name}'. Pass --product-name to choose one.")
+    print(f"[product] {describe_product(name)}")
+    remember_product(name, source_hash=source_hash, whitepaper=whitepaper_path,
+                     explicit=True if given else None)
+    return name
+
+
 def run_video(whitepaper_path: str, channel: str = "bluesky", product_name: str | None = None,
               features: list[str] | None = None, n_posts: int = 1,
               target_region: str | None = None, target_audience: str | None = None) -> int:
@@ -1433,13 +1470,7 @@ def run_video(whitepaper_path: str, channel: str = "bluesky", product_name: str 
 
     whitepaper_path = whitepaper_path.strip()
     audit.log_event("pipeline", "video.start", whitepaper=whitepaper_path, channel=channel)
-    product_name = product_name or Path(whitepaper_path).stem
-    print(f"[product] {describe_product(product_name)}")
-    try:
-        source_hash = topic_index.file_hash(whitepaper_path)
-    except OSError:
-        source_hash = None
-    remember_product(product_name, source_hash=source_hash, whitepaper=whitepaper_path)
+    product_name = _resolve_product_name(product_name, whitepaper_path)
     features = features or []
 
     # Same generation path as `run()` — the text half of a video post is
@@ -1526,21 +1557,7 @@ def run(whitepaper_path: str, channel: str = "x", product_name: str | None = Non
     audit.log_event("pipeline", "run.start", whitepaper=whitepaper_path, channel=channel)
 
     # Step 1 and step 3: same either way, see _extract_topics_and_generate.
-    product_name = product_name or Path(whitepaper_path).stem
-
-    # 2026-09-20: say out loud whether this name has been used before.
-    # The name is the key every play file, topic index and history row
-    # hangs off, and it is re-typed by hand every run — four spellings of
-    # the same cat whitepaper split the history four ways and made every
-    # analysis report "no prior posts". Nothing here renames anything;
-    # the name stays a human decision, it is just no longer an invisible
-    # one. See product_registry.py.
-    try:
-        source_hash = topic_index.file_hash(whitepaper_path)
-    except OSError:
-        source_hash = None  # unreadable path is reported properly further down
-    print(f"[product] {describe_product(product_name)}")
-    remember_product(product_name, source_hash=source_hash, whitepaper=whitepaper_path)
+    product_name = _resolve_product_name(product_name, whitepaper_path)
     features = features or []
     drafts = _extract_topics_and_generate(whitepaper_path, channel, product_name, features, n_posts,
                                            target_region=target_region, target_audience=target_audience)

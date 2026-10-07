@@ -100,4 +100,22 @@ csql = (Path(__file__).resolve().parent.parent / "warehouse/models/staging/stg_c
 months = dict(duckdb.sql(f"select cluster_id, month from ({csql}) where product = 'P'").fetchall())
 assert months[1] == "2026-09", months
 print("6. 同一秒先登記再核准:Python 和 DuckDB 都讀到核准後那列;資料表的 month 用週一 ✅")
+
+# --- 產品名:沒給 --product-name 時沿用人為這份文件取的名字(2026-10-07)---
+os.chdir(R)
+from contentmaster import product_registry as reg, pipeline
+doc = R / "cat.rtfd"; doc.mkdir(); (doc / "TXT.rtf").write_text("{\\rtf1 cats}")
+pipeline.topic_index.file_hash = lambda p: "HASH1"
+assert pipeline._resolve_product_name(None, str(doc)) == "cat"                 # 從沒取過名 -> 檔名
+assert pipeline._resolve_product_name("Fluffy roommate", str(doc)) == "Fluffy roommate"
+assert pipeline._resolve_product_name(None, str(doc)) == "Fluffy roommate"      # 沿用人取的名字
+assert pipeline._resolve_product_name("Other", str(doc)) == "Other"             # 人新打的名字永遠優先
+assert pipeline._resolve_product_name(None, str(doc)) == "Other"
+assert reg.lookup("cat")["explicit"] is False and reg.lookup("Other")["explicit"] is True
+pipeline.topic_index.file_hash = lambda p: "HASH2"                              # 換了內容,同一個路徑
+assert pipeline._resolve_product_name(None, str(doc)) == "Other"
+# 舊紀錄沒有 explicit 欄位:名字跟檔名不同 = 人打的
+assert reg._is_explicit({"name": "Fluffy roommate", "whitepaper": "cat.rtf"})
+assert not reg._is_explicit({"name": "cat", "whitepaper": "/x/cat.rtfd"})
+print("7. 產品名:人打的優先;沒打就沿用人上次給這份文件的名字;從沒取過才用檔名;LLM 不碰 ✅")
 print("\nall passed")

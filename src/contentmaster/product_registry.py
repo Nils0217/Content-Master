@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from .config import settings
@@ -75,7 +76,51 @@ def describe(name: str) -> str:
             f"{record.get('last_used', '?')[:16]}.")
 
 
-def remember(name: str, source_hash: str | None = None, whitepaper: str | None = None) -> dict[str, Any]:
+def _is_explicit(record: dict[str, Any]) -> bool:
+    """Was this name typed by a human, or defaulted from the file name?
+    Recorded from 2026-10-07; for older rows, a name that differs from the
+    document's file name must have been typed."""
+    if "explicit" in record:
+        return bool(record["explicit"])
+    wp = record.get("whitepaper") or ""
+    return bool(wp) and record.get("name") != Path(wp).stem
+
+
+def name_for_document(whitepaper: str, source_hash: str | None) -> str | None:
+    """The name a human last gave this document, or None if they never did.
+
+    2026-10-07. With no --product-name, the name fell back to the file's
+    stem — so `cat.rtfd` silently became a product called "cat", next to
+    the "Fluffy roommate" history the same document already had, and the
+    10/05 post started a second history at post #1. The name is still
+    never invented: this only returns one a human typed for this same
+    document (matched by content hash, or by path)."""
+    resolved = str(Path(whitepaper).expanduser().resolve()) if whitepaper else ""
+
+    def same_document(r: dict[str, Any]) -> bool:
+        return bool((source_hash and source_hash in (r.get("source_hashes") or []))
+                    or (resolved and r.get("whitepaper")
+                        and str(Path(r["whitepaper"]).expanduser().resolve()) == resolved))
+
+    # The most recently WRITTEN typed name wins. Not `last_used`: it has
+    # one-second resolution, and two names given in the same second tied.
+    latest = _latest()
+    found = None
+    if REGISTRY_PATH.exists():
+        with REGISTRY_PATH.open() as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                name = json.loads(line).get("name")
+                r = latest.get(name)
+                if r and _is_explicit(r) and same_document(r):
+                    found = name
+    return found
+
+
+def remember(name: str, source_hash: str | None = None, whitepaper: str | None = None,
+             explicit: bool | None = None) -> dict[str, Any]:
     """Records one use of `name`. Called once per run, after the human has
     seen describe()'s reminder and gone ahead anyway.
 
@@ -96,6 +141,9 @@ def remember(name: str, source_hash: str | None = None, whitepaper: str | None =
         "times_used": (prior or {}).get("times_used", 0) + 1,
         "source_hashes": hashes,
         "whitepaper": whitepaper or (prior or {}).get("whitepaper"),
+        # True when a human typed this name for this run (--product-name).
+        # name_for_document() only ever reuses a typed name.
+        "explicit": bool(explicit) if explicit is not None else (prior or {}).get("explicit", False),
     }
     REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with REGISTRY_PATH.open("a") as fh:
