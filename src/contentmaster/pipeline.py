@@ -1479,6 +1479,32 @@ def _print_queue_summary(drafts: list[dict[str, Any]]) -> None:
     print("\nOpening the review page — approve, edit, or reject there.")
 
 
+def _stale_review_server(port: int) -> int | None:
+    """PID of THIS project's review server on `port` if it predates the
+    newest source file, else None. Anything else on the port — another
+    app, a server that cannot be inspected — is left alone."""
+    import subprocess
+    from datetime import datetime
+
+    try:
+        pid = int(subprocess.run(["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                                 capture_output=True, text=True, timeout=5).stdout.split()[0])
+        info = subprocess.run(["ps", "-o", "lstart=,command=", "-p", str(pid)],
+                              capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+    app = str(settings.project_root / "streamlit_app.py")
+    if app not in info:
+        return None
+    try:
+        started = datetime.strptime(" ".join(info.split()[:5]), "%a %b %d %H:%M:%S %Y").timestamp()
+    except ValueError:
+        return None
+    sources = [Path(app), *(Path(__file__).parent).rglob("*.py")]
+    newest = max(f.stat().st_mtime for f in sources if f.exists())
+    return pid if newest > started else None
+
+
 def launch_streamlit() -> None:
     """Starts streamlit_app.py as its own process, not headless, so it
     opens your default browser on its own. Prints the url too as a
@@ -1512,11 +1538,33 @@ def launch_streamlit() -> None:
 
     try:
         with socket.create_connection(("localhost", 8501), timeout=0.5):
+            running = True
+    except OSError:
+        running = False
+    if running:
+        stale = _stale_review_server(8501)
+        if stale is None:
             print(f"Streamlit is already running — opening {url}.")
             webbrowser.open(url)
             return
-    except OSError:
-        pass
+        # 2026-10-07: a server started before the code changed keeps the old
+        # modules in memory while each page load re-reads streamlit_app.py,
+        # so the page breaks on the first new import (ImportError:
+        # NotSchedulable). Third time this bit; restarted instead of reused.
+        import os
+        import signal
+        import time
+
+        print(f"[restart] The review page was started before the code last changed — "
+              f"restarting it (pid {stale}).")
+        os.kill(stale, signal.SIGTERM)
+        for _ in range(20):
+            time.sleep(0.25)
+            try:
+                with socket.create_connection(("localhost", 8501), timeout=0.2):
+                    continue
+            except OSError:
+                break
 
     app_path = settings.project_root / "streamlit_app.py"
     subprocess.Popen(
