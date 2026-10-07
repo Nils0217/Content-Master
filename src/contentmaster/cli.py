@@ -129,6 +129,40 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_clusters(args: argparse.Namespace) -> int:
+    """Every cluster and the posts in it. Backfills cluster 0 first."""
+    from . import clusters, posts
+
+    added = posts.backfill_from_tracking()
+    if added:
+        print(f"[backfill] {added} post(s) published before clusters existed → cluster 0.\n")
+    by_product = sorted({(c["product"], c["channel"]) for c in clusters.all_clusters().values()})
+    if not by_product:
+        print("No clusters yet.")
+        return 0
+    for product, channel in by_product:
+        for c in clusters.for_product(product, channel):
+            cid = c["cluster_id"]
+            if cid == 0:
+                head = "cluster 0  (before clusters existed — tests nothing)"
+            else:
+                head = (f"cluster {cid}  week of {c['week_start']} ({clusters.month_of(c)})  "
+                        f"{c['status']}  experiment days: {', '.join(c['experiment_weekdays'])}")
+            print(f"{product} / {channel} — {head}")
+            if c.get("hypothesis"):
+                print(f"    hypothesis: {c['hypothesis'].get('test', '')}  "
+                      f"(watch {c['hypothesis'].get('watch') or '—'})")
+            for r in posts.in_cluster(product, channel, cid):
+                nid = f"#{r['natural_id']}" if r.get("natural_id") else "#—"
+                role = ("extra" if r["kind"] == "extra" else
+                        "experiment" if r.get("experiment") else
+                        "main" if r.get("experiment") is False else "")
+                when = r.get("published_at") or r.get("scheduled_at") or r.get("scheduled_for") or ""
+                print(f"    {nid:>4}  {r['status']:<9} {role:<10} {str(when)[:16]:<16} {r['post_id']}")
+            print()
+    return 0
+
+
 def _cmd_refresh(args: argparse.Namespace) -> int:
     return _pipeline.refresh_metrics()
 
@@ -348,6 +382,10 @@ def build_parser() -> argparse.ArgumentParser:
              "and which errors keep repeating",
     )
     p_status.set_defaults(func=_cmd_status)
+
+    p_clusters = sub.add_parser(
+        "clusters", help="List hypothesis clusters and the posts in each (natural id, role, status)")
+    p_clusters.set_defaults(func=_cmd_clusters)
 
     p_platforms = sub.add_parser("platforms", help="List implemented and planned platforms")
     p_platforms.set_defaults(func=_cmd_platforms)
