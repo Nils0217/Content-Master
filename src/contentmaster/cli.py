@@ -67,6 +67,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     whitepaper = _resolve_whitepaper(args.whitepaper)
     if whitepaper is None:
         return 1
+    if args.cluster:
+        return _pipeline.run_cluster(whitepaper, channel=args.channel,
+                                     product_name=args.product_name, terminal=args.terminal,
+                                     no_image=args.no_image)
     _pipeline.run(whitepaper, channel=args.channel, product_name=args.product_name,
                    features=args.features, n_posts=args.posts, terminal=args.terminal,
                    target_region=args.target_region, target_audience=args.target_audience,
@@ -312,6 +316,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--target-audience", default=None,
         help="Free text describing the target audience, e.g. 'cat owners in the US'. Same "
              "persistence behavior as --target-region.",
+    )
+    p_run.add_argument(
+        "--cluster", action="store_true",
+        help="Draft next week's hypothesis cluster: seven posts dated Monday to Sunday, five "
+             "making the week's change and two (the experiment days) deliberately not. "
+             "Approving one does not publish it. Run again to fill days left empty. Without "
+             "this flag, --posts N drafts extra posts that publish on approval.",
     )
     p_run.set_defaults(func=_cmd_run)
 

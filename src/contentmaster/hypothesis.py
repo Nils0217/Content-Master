@@ -173,8 +173,9 @@ def review_view(h: dict[str, Any] | None, row: dict[str, Any] | None) -> dict[st
                 view["other"] = f"Advisor {s['role']} proposed: {summary_line(s['parsed'])}"
     elif row:
         view["problem"] = {
-            "none_usable": "Neither advisor answered in the TEST/WHY/WATCH form — no hypothesis "
-                           "this round. Their replies are under the steps below.",
+            "none_usable": "Neither advisor gave a test with a readable TEST and a WATCH this "
+                           "system can measure — no hypothesis this round. Their replies are "
+                           "under the steps below.",
             "no_response": "Neither advisor responded.",
         }.get(row.get("outcome", ""), "")
     return view

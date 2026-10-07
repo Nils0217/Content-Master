@@ -629,6 +629,98 @@ def _environment(published: dict[str, Any], channel: str) -> dict[str, Any]:
     return env
 
 
+# --- the post table (posts.py), kept in step from below both review surfaces ---
+
+def is_scheduled_kind(entry: dict[str, Any]) -> bool:
+    """A cluster post: approval does NOT publish it — it waits for its
+    scheduled day. Extras (run --posts N) publish on approval as before."""
+    return entry.get("kind") == "cluster" and (entry.get("cluster_id") or 0) > 0
+
+
+class NotSchedulable(ValueError):
+    """The approved text would be refused at publish time."""
+
+    def __init__(self, reasons: list[str]):
+        self.reasons = reasons
+        super().__init__("Not approved — this would be refused when its day comes:\n  - "
+                         + "\n  - ".join(reasons))
+
+
+def approve_for_schedule(draft_id: str, final_text: str, image_path: str | None = None,
+                         edited: bool = False, reviewer_note: str = "",
+                         acknowledged: bool = False) -> dict[str, Any]:
+    """Approval of a cluster post. Records the approved text and gives the
+    post its natural_id; nothing is sent. Both review surfaces call this —
+    see .claude/skills/two-review-surfaces.
+
+    The publish guard runs HERE, not only at publish: a scheduled post goes
+    out with nobody watching, so a post that would be refused has to be
+    caught while a human is still looking. Platform limits always block;
+    `acknowledged` waives only the "does not look like a post" checks, as
+    it does in step5_publish().
+    """
+    from . import posts
+
+    entry = draft_queue._latest_entries().get(draft_id) or {}
+    channel = entry.get("channel", "")
+    reasons = (get_platform(channel).constraints.violations(final_text)
+               if channel in PLATFORMS else [])
+    if not reasons and not acknowledged:
+        reasons = publish_blockers(final_text, entry.get("original_text") or entry.get("text"),
+                                   channel=channel)
+    if reasons:
+        raise NotSchedulable(reasons)
+
+    fields: dict[str, Any] = {"status": "approved", "text": final_text, "edited": edited}
+    if image_path is not None:
+        fields["image_path"] = image_path
+    if reviewer_note:
+        fields["reviewer_note"] = reviewer_note
+    draft_queue.update_entry(draft_id, **fields)
+    row = posts.approve(draft_id)
+    audit.log_event("posts", "approved_for_schedule", post_id=draft_id,
+                     natural_id=row["natural_id"], cluster_id=row["cluster_id"],
+                     scheduled_for=row.get("scheduled_for"))
+    return row
+
+
+def record_rejected(draft_id: str) -> None:
+    """A rejected draft keeps its row (status rejected) and never takes a
+    natural_id. Called by both review surfaces."""
+    from . import posts
+
+    if posts.get(draft_id):
+        posts.update(draft_id, status="rejected")
+
+
+def record_published(product_name: str, channel: str, published: dict[str, Any]) -> None:
+    """After a real publish. A post not yet in the table is an extra (run
+    --posts N): it is registered against the cluster whose week covers
+    today, or 0 when none does, so its effect on that week stays visible."""
+    from datetime import date, timedelta
+    from . import clusters, posts
+
+    pid = published["id"]
+    if posts.get(pid) is None:
+        today = date.today()
+        covering = [c for c in clusters.for_product(product_name, channel)
+                    if c["cluster_id"] > 0 and c.get("week_start")
+                    and date.fromisoformat(c["week_start"]) <= today
+                    < date.fromisoformat(c["week_start"]) + timedelta(days=7)]
+        posts.register(pid, product_name, channel,
+                       cluster_id=covering[-1]["cluster_id"] if covering else 0,
+                       kind="extra", experiment=None)
+    if not posts.get(pid).get("natural_id"):
+        posts.approve(pid)
+    posts.update(pid, status="published", post_ref=published.get("post_ref"),
+                 published_at=datetime_now_iso())
+
+
+def datetime_now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def step6_queue_for_review(product_name: str, channel: str, published: dict[str, Any],
                             edited: bool, reviewer_note: str,
                             labels: dict[str, Any] | None = None) -> None:
@@ -661,6 +753,7 @@ def step6_queue_for_review(product_name: str, channel: str, published: dict[str,
         return
     audit.log_event("tracking_review", "queued", post_id=published["id"],
                      product=product_name, channel=channel)
+    record_published(product_name, channel, published)
 
     # 2026-09-15 (topic_index.py): usage counts only bump once a post
     # actually publishes — a draft rejected at human review never reaches
@@ -679,7 +772,9 @@ def step6_queue_for_review(product_name: str, channel: str, published: dict[str,
 # the tracked post to history. Both review surfaces read this one tuple —
 # streamlit_app.py kept its own copy until 2026-10-04.
 LABEL_KEYS = ("topic_reason", "characteristics", "test_axis", "test_arm",
-              "evidence_used", "evidence_against", "tests_hypothesis_id")
+              "evidence_used", "evidence_against", "tests_hypothesis_id",
+              # 2026-10-07: where the post sits in the cluster design (clusters.py)
+              "cluster_id", "kind", "experiment", "scheduled_for")
 
 
 class StaleAnalysis(RuntimeError):
@@ -1226,10 +1321,35 @@ def _run_terminal(product_name: str, channel: str, drafts: list[dict[str, Any]],
             decision = step4_human_review(draft, product_name)
             if not decision.approved:
                 capture_failure(product_name, channel, draft["text"], decision.reviewer_note or "rejected")
+                record_rejected(draft["id"])
                 results.append({"draft": i, "status": "rejected", "text": draft["text"], "channel": channel})
                 continue
             image, image_alt = step4b_generate_image(draft, decision.final_text, product_name,
                                                       no_image=no_image)
+            if is_scheduled_kind(draft):
+                # A cluster post waits for its day; approval only records it.
+                # Stored in the draft queue (with its image file) because that
+                # is where the scheduled publish will read it from.
+                image_path = _save_image(draft["id"], image)
+                draft_queue.queue_draft(
+                    draft["id"], product_name, channel, decision.final_text,
+                    topic=draft.get("topic", ""), brief=draft.get("brief", ""),
+                    image_path=image_path, source=draft.get("source", "unknown"),
+                    labels={k: draft.get(k) for k in LABEL_KEYS if draft.get(k) is not None})
+                try:
+                    row = approve_for_schedule(draft["id"], decision.final_text, image_path,
+                                               edited=decision.edited,
+                                               reviewer_note=decision.reviewer_note)
+                except NotSchedulable as e:
+                    print(f"\n[not approved] {e}\n  It stays in the review queue — fix it in "
+                          "the browser review page, or reject it and run `--cluster` again.")
+                    results.append({"draft": i, "status": "not approved (would be refused)",
+                                    "text": decision.final_text, "channel": channel})
+                    continue
+                results.append({"draft": i, "status": f"approved #{row['natural_id']}, for "
+                                f"{draft.get('scheduled_for')} (not published yet)",
+                                "text": decision.final_text, "channel": channel})
+                continue
             published = step5_publish(draft, decision.final_text, image=image, image_alt=image_alt)
             step6_queue_for_review(product_name, channel, published,
                                     edited=decision.edited, reviewer_note=decision.reviewer_note,
@@ -1260,6 +1380,16 @@ def _run_terminal(product_name: str, channel: str, drafts: list[dict[str, Any]],
 
     audit.log_event("pipeline", "run.done")
     _print_run_summary(results)
+
+
+def _save_image(draft_id: str, image: bytes | None) -> str | None:
+    if not image:
+        return None
+    out_dir = settings.data_root / "generated_images"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{draft_id}.{image_generator.image_format(image) or 'png'}"
+    path.write_bytes(image)
+    return str(path)
 
 
 def _run_streamlit(product_name: str, channel: str, drafts: list[dict[str, Any]],
@@ -1398,6 +1528,147 @@ def launch_streamlit() -> None:
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     print("Opening the review page in your browser (http://localhost:8501 if it does not open on its own).")
+
+
+# --- clusters (2026-10-07, see clusters.py) -----------------------------------
+
+# A slot is filled while its post is still on its way out or already out.
+_LIVE_STATUSES = ("draft", "approved", "scheduled", "published")
+
+
+def _opening_hypothesis(product_name: str, channel: str,
+                        topics: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The first hypothesis, when no analysis has chosen one yet. Same
+    advisors and judge as a checkpoint analysis, so it is recorded the same
+    way (plays/_reasoning.jsonl) — there is just no post being reviewed."""
+    from .analysis import _query_trending_context
+
+    start = AnalysisResult(
+        product=product_name, channel=channel, checkpoint="cluster-start", n_prior_posts=0,
+        historical_avg_score=None, current_score=0.0, trend="no_history",
+        prior_suggestion="", prior_suggestion_effectiveness="unknown",
+        evidence=("A new week-long test is starting. No hypothesis has been tested yet, so "
+                  "choose the first one: the single change most worth trying across this week's "
+                  "posts."),
+        trending_context=_query_trending_context(), has_baseline=False)
+    strategy = synthesize_strategy(
+        product_name, channel, start, target=topic_index.load_target(product_name),
+        checkpoint="cluster-start", category=topic_index.load_category(product_name),
+        topic_names=[t["topic"] for t in topics if t.get("topic")])
+    return strategy.hypothesis
+
+
+def run_cluster(whitepaper_path: str, channel: str = "bluesky", product_name: str | None = None,
+                terminal: bool = False, no_image: bool = False, today: Any = None) -> int:
+    """`contentmaster run --cluster`: the next week's seven posts at once.
+
+    One hypothesis for the week — the one the latest decided analysis chose,
+    or, when none has, a first one chosen now. Five posts make that change;
+    the two on this cluster's experiment days deliberately do not. Each post
+    is dated to its day; approving it does NOT publish it (scheduling comes
+    after review).
+
+    Run again while the cluster is still being reviewed and it only fills
+    days left empty — a rejected post, or a model that returned too few.
+    """
+    from datetime import date
+    from . import clusters, posts
+
+    whitepaper_path = whitepaper_path.strip()
+    product_name = _resolve_product_name(product_name, whitepaper_path)
+    posts.backfill_from_tracking()
+    week = clusters.week_start_after(today or date.today())
+
+    try:
+        topics_all = step1_cognee_extract_topics(whitepaper_path, product_name=product_name)
+    except ReviewInterrupted:
+        print("\n[stopped] Topic review interrupted — no cluster created.")
+        return 1
+    if not topics_all:
+        print("[error] This product has no topic index, and a cluster needs seven grounded "
+              "posts. Run `contentmaster run` once to extract topics, then try again.")
+        return 1
+
+    existing = [c for c in clusters.for_product(product_name, channel)
+                if c["cluster_id"] > 0 and c.get("week_start") == week.isoformat()]
+    prior = find_best_prior(product_name, channel) or {}
+    if existing:
+        cluster = existing[0]
+        if cluster["status"] != "drafting":
+            print(f"[cluster {cluster['cluster_id']}] The week of {week} is already {cluster['status']} "
+                  "— nothing to fill.")
+            return 0
+        h = cluster.get("hypothesis")
+        print(f"[cluster {cluster['cluster_id']}] Filling empty days in the week of {week}.")
+    else:
+        h = prior.get("hypothesis")
+        learned_from = None
+        if h:
+            source = posts.get(prior.get("post_id") or "")
+            learned_from = source["cluster_id"] if source else None
+            print(f"[hypothesis] From the latest decided analysis: {h.get('test')}")
+        else:
+            print("[hypothesis] No analysis has chosen one yet — asking the advisors for the first.")
+            h = _opening_hypothesis(product_name, channel, topics_all)
+            if not h:
+                print("[error] The advisors gave no usable hypothesis (see plays/_reasoning.jsonl). "
+                      "No cluster created — a week of posts with nothing to test tests nothing.")
+                return 1
+            print(f"[hypothesis] {h.get('test')}  (watch: {h.get('watch') or 'none readable'})")
+        cluster = clusters.create(product_name, channel, week, h, learned_from)
+
+    cid = cluster["cluster_id"]
+    filled = {r.get("scheduled_for") for r in posts.in_cluster(product_name, channel, cid, kind="cluster")
+              if r["status"] in _LIVE_STATUSES}
+    empty = [sl for sl in clusters.slots(cid, week) if sl["date"] not in filled]
+    if not empty:
+        print(f"[cluster {cid}] All seven days already have a post.")
+        return 0
+
+    index = topic_index.load_index(product_name) or {}
+    offered = topic_index.pick_topics(index, len(empty)) or topics_all[:len(empty)]
+    prior_for = {**prior, "hypothesis": h}
+    generator = DraftGenerator()
+    pools: dict[bool, list[dict[str, Any]]] = {}
+    for is_exp, arm in ((False, "main"), (True, "experiment")):
+        need = sum(1 for sl in empty if sl["experiment"] == is_exp)
+        got: list[dict[str, Any]] = []
+        mine = [t for t, sl in zip(offered, empty) if sl["experiment"] == is_exp] or offered
+        for _attempt in range(2):  # one retry for a model that returned too few
+            if len(got) >= need:
+                break
+            got += generator.draft_posts(
+                {"name": product_name, "features": []}, channel, n=need - len(got), topics=mine,
+                prior=prior_for, target=topic_index.load_target(product_name),
+                category=topic_index.load_category(product_name), cluster_arm=arm) or []
+        pools[is_exp] = got[:need]
+
+    drafts = []
+    for sl in empty:
+        if not pools[sl["experiment"]]:
+            continue
+        d = pools[sl["experiment"]].pop(0)
+        d.update({"kind": "cluster", "cluster_id": cid, "experiment": sl["experiment"],
+                  "scheduled_for": sl["date"]})
+        posts.register(d["id"], product_name, channel, cluster_id=cid, kind="cluster",
+                       experiment=sl["experiment"], scheduled_for=sl["date"])
+        drafts.append(d)
+    missing = [f"{sl['weekday']} {sl['date']}" for sl in empty
+               if sl["date"] not in {d["scheduled_for"] for d in drafts}]
+    audit.log_event("cluster", "drafted", product=product_name, channel=channel, cluster_id=cid,
+                     week_start=week.isoformat(), drafted=len(drafts), missing=missing)
+    print(f"[cluster {cid}] week of {week}: {len(drafts)} draft(s) — experiment days "
+          f"{', '.join(cluster['experiment_weekdays'])}.")
+    if missing:
+        print(f"[note] No draft for {', '.join(missing)} — run `contentmaster run --cluster` "
+              "again to fill them.")
+    if not drafts:
+        return 1
+    if terminal:
+        _run_terminal(product_name, channel, drafts, no_image=no_image)
+    else:
+        _run_streamlit(product_name, channel, drafts, no_image=no_image)
+    return 0
 
 
 def _resolve_product_name(given: str | None, whitepaper_path: str) -> str:

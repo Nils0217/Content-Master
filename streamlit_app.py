@@ -40,6 +40,9 @@ from contentmaster.draft_generator import DraftGenerator
 from contentmaster.modiqo_play import capture_failure
 from contentmaster.pipeline import apply_analysis_decision, step5_publish, step6_queue_for_review
 from contentmaster.pipeline import LABEL_KEYS, PublishFailed, StaleAnalysis
+from contentmaster.pipeline import (NotSchedulable, approve_for_schedule, is_scheduled_kind,
+                                    record_rejected)
+from contentmaster import clusters
 from contentmaster import hypothesis as hyp, reasoning
 from contentmaster.publish_guard import publish_blockers
 from contentmaster.platforms.registry import get_platform
@@ -247,9 +250,36 @@ with tab_drafts:
         else:
             st.caption("No image for this draft (Cloudflare not configured, or the call failed).")
 
+        # 2026-10-07: a cluster post is dated to its day and part of a test;
+        # say which side of the test it is on before anyone approves it.
+        scheduled = is_scheduled_kind(entry)
+        if scheduled:
+            c = clusters.get(entry["product"], entry["channel"], entry["cluster_id"]) or {}
+            h = (c.get("hypothesis") or {}).get("test", "")
+            role = ("**Experiment** — deliberately does NOT make this week's change"
+                    if entry.get("experiment") else "**Main** — makes this week's change")
+            st.info(f"Cluster {entry['cluster_id']} · {entry.get('scheduled_for')} · {role}\n\n"
+                    f"This week's hypothesis: {h}")
+
         col_a, col_e, col_f, col_r = st.columns(4)
 
-        if col_a.button("Approve and publish"):
+        if scheduled and col_a.button(f"Approve for {entry.get('scheduled_for')}"):
+            try:
+                row = approve_for_schedule(
+                    draft_id, st.session_state[text_key], entry.get("image_path"),
+                    edited=bool(entry.get("edited")) or st.session_state[text_key] != entry["text"],
+                    reviewer_note=entry.get("reviewer_note", ""),
+                    acknowledged=bool(st.session_state.get(f"ack_short_{draft_id}")))
+            except NotSchedulable as e:
+                st.error(str(e))
+                st.checkbox("I have read the above and this really is the post text I want",
+                            key=f"ack_short_{draft_id}")
+                st.stop()
+            st.success(f"Approved as #{row['natural_id']}. Not published — it goes out on "
+                       f"{row.get('scheduled_for')} once the cluster is scheduled.")
+            st.rerun()
+
+        if not scheduled and col_a.button("Approve and publish"):
             draft = {"id": draft_id, "channel": entry["channel"], "topic": entry.get("topic", ""),
                       "brief": entry.get("brief", "")}
             # 2026-09-19 (real usage bug, see docs/LOG.md): this used to call
@@ -396,6 +426,7 @@ with tab_drafts:
                 reason = "; ".join(notes) or "rejected in review UI (no reason given)"
                 capture_failure(entry["product"], entry["channel"], st.session_state[text_key], reason)
                 draft_queue.update_entry(draft_id, status="rejected", reviewer_note=reason)
+                record_rejected(draft_id)
                 st.session_state[f"show_reject_{draft_id}"] = False
                 st.info("Rejected.")
                 st.rerun()

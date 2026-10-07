@@ -138,6 +138,15 @@ assert s.hypothesis["picked"] == "B" and reasoning.load(s.reasoning_id)["outcome
 assert len(reasoning.load(s.reasoning_id)["steps"]) == 2        # 只有一個可用,不叫裁判
 print("11. 只有一位顧問可用 -> 直接用它,不浪費一次裁判 ✅")
 
+# 2026-10-07 真實 cluster 實跑:裁判選了一個 WATCH 讀不到的假設
+fake({d._MODEL_A: "TEST: use only one section\nWHY: focus\nWATCH: engagement with the section",
+      d._MODEL_B: REAL["mistral_two"], d._JUDGE_MODEL: "PICK: A\nREASON: r"})
+s = d.synthesize_strategy("P", "bluesky", mk(False), post_id="draft-7", checkpoint="7d")
+assert s.hypothesis["picked"] == "B" and s.hypothesis["watch"] == "likes"
+row = reasoning.load(s.reasoning_id)
+assert row["outcome"] == "only_one_usable" and row["steps"][0]["parsed"]["test"] == "use only one section"
+print("11b. WATCH 讀不到數字的提案不能參選(紀錄照留),量不到的測試不算測試 ✅")
+
 # --- 兩個審核介面共用的畫面 ---
 fake({d._MODEL_A: REAL["llama_question"], d._MODEL_B: REAL["mistral_shares"],
       d._JUDGE_MODEL: "PICK: A\nREASON: r"})

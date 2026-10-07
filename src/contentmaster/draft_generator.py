@@ -171,15 +171,29 @@ def _match_topic(name: str, topics: list[dict[str, Any]]) -> dict[str, Any] | No
     """
     if not name:
         return None
-    wanted = name.strip().lower()
+
+    def norm(x: str) -> str:
+        # 2026-10-07: the document numbers its sections ("3. Basic Operating
+        # Procedure") and the model drops the number. A real cluster run lost
+        # all five main-arm drafts this way, twice.
+        # Curly vs straight quotes too: the document says "Cat’s", the model
+        # types "Cat's".
+        x = x.translate(_QUOTES)
+        return _SECTION_NUMBER.sub("", x.strip().lower()).strip()
+
+    wanted = norm(name)
     for t in topics:
-        if t["topic"].strip().lower() == wanted:
+        if norm(t["topic"]) == wanted:
             return t
     for t in topics:
-        actual = t["topic"].strip().lower()
-        if wanted.startswith(actual) or actual.startswith(wanted):
+        actual = norm(t["topic"])
+        if actual and wanted and (wanted.startswith(actual) or actual.startswith(wanted)):
             return t
     return None
+
+
+_SECTION_NUMBER = re.compile(r"^\d+(?:\.\d+)*[.)]?\s+")
+_QUOTES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"'})
 
 def trends_as_of() -> str | None:
     """The last day the trend seed covers, e.g. "2026-09-13", or None.
@@ -300,7 +314,8 @@ def _subject_description(name: str, category: str) -> str:
             "product, a purchase, or a problem-it-solves that the document does not contain.")
 
 
-def _hypothesis_instruction(h: dict[str, Any] | None, require_field: bool) -> str:
+def _hypothesis_instruction(h: dict[str, Any] | None, require_field: bool,
+                            cluster_arm: str | None = None) -> str:
     """The test the last analysis chose (2026-10-04). Before this the
     analysis step's hypothesis was stored and never shown to the model
     writing the next post, so nothing was ever tested against it."""
@@ -308,8 +323,17 @@ def _hypothesis_instruction(h: dict[str, Any] | None, require_field: bool) -> st
         return ""
     from .hypothesis import render
 
+    if cluster_arm == "experiment":
+        # The 20% that differ from the week's hypothesis (clusters.py). They
+        # are the comparison, so they leave out exactly that one change.
+        return ("THIS WEEK'S HYPOTHESIS, which most posts this week follow:\n"
+                f"{render(h)}\n"
+                "These posts are the comparison. Do NOT make that change — write them the way "
+                "you would without it. Do not change anything else on purpose either.\n\n")
     out = ("HYPOTHESIS TO TEST. With no performance baseline yet, the last analysis chose one "
            f"thing to try:\n{render(h)}\n")
+    if cluster_arm == "main":
+        return out + "Every post here makes exactly that change and nothing else.\n\n"
     if require_field:
         out += ("At least one of these posts must make exactly that change and nothing else, "
                 "so its result can be read against it. Mark that post `HYPOTHESIS: yes` and "
@@ -423,6 +447,7 @@ class DraftGenerator:
         topics: list[dict[str, Any]] | None = None,
         target: dict[str, Any] | None = None,
         category: str = "",
+        cluster_arm: str | None = None,
     ) -> list[dict[str, Any]]:
         """Turns Cognee's extracted product knowledge into N draft posts
         for one channel.
@@ -467,11 +492,13 @@ class DraftGenerator:
         name = product.get("name", "the product")
         if topics:
             drafts = self._llm_draft_posts_for_topics(name, channel, topics, prior, target,
-                                                       n=n, category=category)
+                                                       n=n, category=category,
+                                                       cluster_arm=cluster_arm)
             if drafts:
                 return drafts
         if context.strip():
-            drafts = self._llm_draft_posts(name, channel, n, context, prior, target)
+            drafts = self._llm_draft_posts(name, channel, n, context, prior, target,
+                                           cluster_arm=cluster_arm)
             if drafts:
                 return drafts
 
@@ -491,14 +518,15 @@ class DraftGenerator:
         # nothing is the honest answer: the run stops and says what is
         # broken, instead of handing a reviewer something to approve that
         # was never about their product.
-        print("[error] No topics and no usable context, and the local LLM did not respond — "
-              "nothing can be grounded, so no drafts were written. Check that Cognee and "
-              "Ollama are up and that --whitepaper points at a readable file.")
+        print("[error] No usable draft came back. Either the local LLM did not respond, or "
+              "every draft it wrote was dropped (see any [dropped] lines above). Check that "
+              "Ollama is up and that --whitepaper points at a readable file.")
         return None
 
     def _llm_draft_posts_for_topics(
         self, name: str, channel: str, topics: list[dict[str, Any]], prior: dict[str, Any] | None = None,
         target: dict[str, Any] | None = None, n: int | None = None, category: str = "",
+        cluster_arm: str | None = None,
     ) -> list[dict[str, Any]] | None:
         """Drafts grounded in the whitepaper's extracted topics.
 
@@ -547,7 +575,10 @@ class DraftGenerator:
         # showed the quota was not working anyway: EVIDENCE-AGAINST read
         # `None`, `Lifestyle`, or blank.
         controls = (draft_labels.controls_needed(name, channel, wanted)
-                    if (prior or {}).get("has_baseline") else 0)
+                    if (prior or {}).get("has_baseline") and not cluster_arm else 0)
+        # 2026-10-07: inside a cluster the comparison is built in — two of
+        # seven posts are the experiment arm — so the rolling control quota
+        # would be a second, conflicting rule on the same posts.
         topic_lines = "\n".join(
             f"- {t['topic']} (used {t.get('used_count', 0)} time(s)): {t['brief']}"
             for t in topics
@@ -609,7 +640,8 @@ class DraftGenerator:
             )
 
         hypothesis = (prior or {}).get("hypothesis")
-        prompt += _hypothesis_instruction(hypothesis, require_field=True)
+        prompt += _hypothesis_instruction(hypothesis, require_field=not cluster_arm,
+                                          cluster_arm=cluster_arm)
         prompt += "VOCABULARY. " + draft_labels.describe_for_prompt() + "\n\n"
         prompt += _target_instruction(target)
         prompt += (
@@ -626,7 +658,7 @@ class DraftGenerator:
             "EVIDENCE-USED: which evidence above you followed, or `none`\n"
             "EVIDENCE-AGAINST: which evidence you deliberately contradicted, or `none`\n"
             + ("HYPOTHESIS: `yes` if this post makes the hypothesis change above, else `no`\n"
-               if hypothesis else "")
+               if hypothesis and not cluster_arm else "")
             + "---\n\n"
             "No numbering, no commentary outside the fields."
         )
@@ -660,7 +692,7 @@ class DraftGenerator:
                 continue
             axis, arm = _parse_axis(block.get("TESTING", ""))
             drafts.append({
-                "id": f"draft-{uuid.uuid4().hex[:8]}", "channel": channel, "text": text,
+                "id": str(uuid.uuid4()), "channel": channel, "text": text,
                 "status": "draft", "topic": topic["topic"], "brief": topic["brief"],
                 "source": "topics",
                 "topic_reason": block.get("WHY", ""),
@@ -668,8 +700,12 @@ class DraftGenerator:
                 "test_axis": axis, "test_arm": arm,
                 "evidence_used": block.get("EVIDENCE-USED", ""),
                 "evidence_against": block.get("EVIDENCE-AGAINST", ""),
-                "tests_hypothesis_id": (hypothesis.get("id") if hypothesis and re.match(
-                    r"\W*yes\b", block.get("HYPOTHESIS", ""), re.IGNORECASE) else None),
+                # In a cluster the arm decides, not the model's answer.
+                "tests_hypothesis_id": (
+                    (hypothesis or {}).get("id") if cluster_arm == "main" else
+                    None if cluster_arm == "experiment" else
+                    hypothesis.get("id") if hypothesis and re.match(
+                        r"\W*yes\b", block.get("HYPOTHESIS", ""), re.IGNORECASE) else None),
             })
 
         if not drafts:
@@ -692,7 +728,8 @@ class DraftGenerator:
 
         # Same rule as the control arm: a required test nobody checks is a
         # wish. Said here, not discovered at the 7d checkpoint.
-        if hypothesis and hypothesis.get("test") and not any(d["tests_hypothesis_id"] for d in drafts):
+        if (hypothesis and hypothesis.get("test") and not cluster_arm
+                and not any(d["tests_hypothesis_id"] for d in drafts)):
             print(f"[note] The last analysis chose a hypothesis to test ({hypothesis['test']!r}), "
                   "but none of these drafts said it tests it (HYPOTHESIS: yes). Approving them "
                   "as they are leaves it untested.")
@@ -705,7 +742,9 @@ class DraftGenerator:
         # "nothing recorded yet".
         draft_labels.confirm_new_labels(draft_labels.record_from_drafts(drafts))
 
-        for problem in draft_labels.validate_group(drafts):
+        # Inside a cluster the comparison is main arm vs experiment arm across
+        # the week; per-batch axis checks would flag every one-sided batch.
+        for problem in ([] if cluster_arm else draft_labels.validate_group(drafts)):
             # Reported, not rejected. A batch of 1 (the default) cannot
             # contain a contrast at all, so refusing here would mean never
             # generating anything; the operator needs to know the batch
@@ -750,7 +789,7 @@ class DraftGenerator:
 
     def _llm_draft_posts(
         self, name: str, channel: str, n: int, context: str, prior: dict[str, Any] | None = None,
-        target: dict[str, Any] | None = None,
+        target: dict[str, Any] | None = None, cluster_arm: str | None = None,
     ) -> list[dict[str, Any]] | None:
         """Ask the local LLM for N posts grounded in Cognee's extracted
         content. Returns None on any failure so the caller can fall back —
@@ -771,7 +810,8 @@ class DraftGenerator:
             )
             if prior.get("hypothesis"):
                 # Same test the topic path is given — see _hypothesis_instruction.
-                prompt += _hypothesis_instruction(prior["hypothesis"], require_field=False)
+                prompt += _hypothesis_instruction(prior["hypothesis"], require_field=False,
+                                                  cluster_arm=cluster_arm)
             else:
                 prompt += (f"An LLM review of that result suggested this specific improvement: "
                            f"\"{prior.get('improvement_note', '')}\"\n")
@@ -822,9 +862,10 @@ class DraftGenerator:
                   f"writing {paired} draft(s) rather than repeating one.")
         # Every post here was told to make the hypothesis change, so every
         # one is labelled as testing it.
-        tested = ((prior or {}).get("hypothesis") or {}).get("id")
+        tested = (None if cluster_arm == "experiment"
+                  else ((prior or {}).get("hypothesis") or {}).get("id"))
         drafts = [
-            {"id": f"draft-{uuid.uuid4().hex[:8]}", "channel": channel, "text": lines[i],
+            {"id": str(uuid.uuid4()), "channel": channel, "text": lines[i],
              "status": "draft", "source": "context", "tests_hypothesis_id": tested}
             for i in range(paired)
         ]

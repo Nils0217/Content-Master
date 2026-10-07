@@ -175,8 +175,9 @@ def _proposal_prompt(
         prompt += (
             "\n\nPropose ONE thing worth testing in the next post. Answer with exactly these "
             "three lines and nothing else:\n"
-            "TEST: one change to how the post is written or what it is about, concrete enough "
-            "that a writer could act on it\n"
+            "TEST: one change to how the NEXT POSTS are written or what they are about, concrete "
+            "enough that a writer could act on it. The source document is fixed — never propose "
+            "editing it; its sections are only what posts can draw on.\n"
             "WHY: one sentence on why it might suit this audience right now\n"
             "WATCH: the one number that will show whether it suited — "
             + ", ".join(hyp.METRICS[:-1]) + f" or {hyp.METRICS[-1]}. These four are the only "
@@ -280,7 +281,12 @@ def _hypothesis(product_name: str, channel: str, raw: dict[str, str | None],
     parsed = {}
     for step in steps:
         step["parsed"] = hyp.parse_hypothesis(step["raw"])
-        if step["parsed"]:
+        # 2026-10-07: a test whose WATCH names no number this system reads
+        # cannot be measured, so it is not a test. Kept in the record (the
+        # step's `parsed` still shows it) but not eligible to be picked — a
+        # real cluster run had the judge pick one, leaving a week of posts
+        # with nothing to read at the end.
+        if step["parsed"] and step["parsed"].get("watch"):
             parsed[step["role"]] = {**step["parsed"], "model": step["model"]}
 
     if not any(raw.values()):
@@ -290,8 +296,9 @@ def _hypothesis(product_name: str, channel: str, raw: dict[str, str | None],
         # Replied, but not in a shape we could read. Said, not swallowed:
         # an empty parse and "nothing to say" must not look the same.
         audit.log_event("discuss", "unparsed", **log)
-        print("[note] Neither advisor's reply had a TEST line — no hypothesis this round. "
-              "Both replies are kept in plays/_reasoning.jsonl.")
+        print("[note] Neither advisor gave a test with a readable TEST and WATCH (likes, "
+              "reposts, replies or bookmarks) — no hypothesis this round. Both replies are kept "
+              "in plays/_reasoning.jsonl.")
         return None, _unmerged(raw), "none_usable"
 
     if len(parsed) == 1 or not _JUDGE_ENABLED:
