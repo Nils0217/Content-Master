@@ -688,7 +688,8 @@ class DraftGenerator:
                 print(f"[dropped] A draft named topic {block.get('TOPIC', '')!r}, which is not "
                       "in this product's index — not queued.")
                 continue
-            if _enforce_constraints([text], channel) != [text]:
+            text = self._fit_to_channel(name, text, channel, brief=topic["brief"])
+            if not text:
                 continue
             axis, arm = _parse_axis(block.get("TESTING", ""))
             drafts.append({
@@ -751,6 +752,47 @@ class DraftGenerator:
             # proves nothing, which is different from it being unusable.
             print(f"[note] This batch tests nothing on one axis: {problem}")
         return drafts[:wanted]
+
+    def _fit_to_channel(self, name: str, text: str, channel: str, brief: str = "") -> str | None:
+        """The draft if it fits the channel; a once-shortened version if it
+        was only too long; None otherwise, said out loud.
+
+        2026-10-10: llama3.2 overshoots Bluesky's 300 characters on about
+        one draft in three (a real run: 302 and 747), and a run with
+        --posts 1 then came back with nothing at all. Shortening keeps the
+        point the model chose; regenerating would throw it away. Still never
+        truncated — cutting the end removes whatever came last.
+        """
+        try:
+            from .platforms.registry import get_platform
+
+            constraints = get_platform(channel).constraints
+        except Exception:
+            return text
+        problems = constraints.violations(text)
+        if not problems:
+            return text
+        limit = constraints.max_post_chars
+        only_length = limit is not None and len(text) > limit and all(
+            "limit" in p or "characters" in p for p in problems)
+        if not only_length:
+            print(f"[dropped] A generated draft broke {channel}'s rules and was not queued: "
+                  f"{'; '.join(problems)}.")
+            return None
+        print(f"[shortening] A draft came back at {len(text)} characters, over {channel}'s "
+              f"{limit} — asking the model to shorten it once.")
+        shorter = self.revise_post(
+            name, text, f"Shorten this to at most {limit - 20} characters. Keep the same point "
+            "and the same facts; cut words, not meaning. Reply with the post only.",
+            brief=brief, channel=channel)
+        if shorter and not constraints.violations(shorter):
+            audit.log_event("draft_generator", "shortened", channel=channel,
+                             before=len(text), after=len(shorter))
+            print(f"[shortened] {len(text)} → {len(shorter)} characters.")
+            return shorter
+        print(f"[dropped] Still over {limit} characters after one shortening attempt — not queued.")
+        audit.log_event("draft_generator", "shorten.failed", channel=channel, before=len(text))
+        return None
 
     def revise_post(self, name: str, current_text: str, feedback: str, brief: str = "",
                     channel: str = "") -> str | None:
@@ -850,7 +892,8 @@ class DraftGenerator:
         except (requests.RequestException, KeyError, IndexError, json.JSONDecodeError):
             return None
 
-        lines = _enforce_constraints(_clean_llm_lines(content), channel)
+        lines = [t for t in (self._fit_to_channel(name, line, channel)
+                             for line in _clean_llm_lines(content)) if t]
         if not lines:
             return None
         # Same positional pairing as _llm_draft_posts_for_topics() — there

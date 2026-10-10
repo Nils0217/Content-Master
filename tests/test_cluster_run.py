@@ -150,4 +150,15 @@ assert _match_topic("Personal anecdote", REAL_T) is None
 assert (_match_topic("Step 2: Identify the Cat's Preferences",
                      [{"topic": "Step 2: Identify the Cat\u2019s Preferences"}]) or {}).get("topic")
 print("11. 模型拿掉章節編號、把彎引號打成直引號都對得到;不存在的主題照樣丟掉 ✅")
+
+# 2026-10-10 真實實跑:6 次有 2 次太長(302、747 字)被整篇丟掉,--posts 1 就什麼都沒有
+gen = dg.DraftGenerator()
+calls = []
+gen.revise_post = lambda name, text, fb, brief="", channel="": calls.append(fb) or "Short enough now."
+assert gen._fit_to_channel("P", "x" * 747, "bluesky") == "Short enough now."
+assert "at most 280 characters" in calls[0]
+gen.revise_post = lambda *a, **k: None
+assert gen._fit_to_channel("P", "x" * 302, "bluesky") is None
+assert gen._fit_to_channel("P", "fits fine", "bluesky") == "fits fine"
+print("12. 太長的草稿先請模型縮短一次;縮不下來才丟,而且會說;本來就合格的不動 ✅")
 print("\nall passed")
