@@ -39,6 +39,15 @@ assert "Trend:" in warm and "TEST:" not in warm
 print("4. 沒基準線 -> 問要測什麼（TEST/WHY/WATCH）;有基準線 -> 問調整 ✅")
 print("   顧問沒有被關掉 —— 冷啟動的 8 篇仍然有方向")
 
+# 2026-10-21 使用者:「無視過期趨勢之類的那些東西」—— 預設關閉,三個來源都回空
+os.environ.pop("TRENDS_ENABLED", None)
+from contentmaster.analysis import _query_trending_context, _query_external_signal
+from contentmaster.draft_generator import _trending_for_prompt
+from contentmaster.hypothesis import describe_environment
+assert _query_trending_context() == "" and _query_external_signal([{"x": 1}]) == "" and _trending_for_prompt() == ""
+assert "trends" not in describe_environment({"followers": 0, "trends_as_of": "2026-09-13"})
+print("5. 搜尋趨勢預設關閉:顧問、寫草稿、審核畫面都看不到 ✅")
+
 # 5. the gate reads the same constants as the win/lose gate
 import contentmaster.analysis as A, inspect
 src = inspect.getsource(A.analyze_performance)

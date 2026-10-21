@@ -140,7 +140,9 @@ def describe_environment(env: dict[str, Any] | None) -> str:
     media = "video" if env.get("has_video") else "image" if env.get("has_image") else "text only"
     parts.append(media)
     if env.get("trends_as_of"):
-        parts.append(f"trends from {env['trends_as_of']}")
+        from .config import trends_enabled
+        if trends_enabled():
+            parts.append(f"trends from {env['trends_as_of']}")
     return ", ".join(parts)
 
 

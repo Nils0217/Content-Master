@@ -93,3 +93,18 @@ class Settings:
 
 
 settings = Settings()
+
+
+def trends_enabled() -> bool:
+    """Whether Google Trends data may reach any prompt or review screen.
+
+    2026-10-21, off by default (user: "無視過期趨勢之類的那些東西"). The
+    seed is a hand-exported CSV that stopped at 2026-09-13 and has no API;
+    advisors kept proposing "cat in the hat" and Romania/Indonesia/Peru
+    from it. Read at call time, so TRENDS_ENABLED=1 turns it back on
+    without code changes. The three readers return "" when off —
+    analysis._query_trending_context, analysis._query_external_signal,
+    draft_generator._trending_for_prompt — so nothing downstream sees it.
+    """
+    return os.environ.get("TRENDS_ENABLED", "0") == "1"
+

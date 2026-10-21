@@ -162,6 +162,10 @@ def _query_external_signal(history: list[dict[str, Any]]) -> str:
     this stays descriptive, not a real statistical claim — it's context
     for a human/LLM to weigh, not a verdict.
     """
+    from .config import trends_enabled
+
+    if not trends_enabled():
+        return ""
     with_interest = [h for h in history if h.get("external_interest") is not None]
     if not with_interest:
         return ""
@@ -205,6 +209,10 @@ def _query_trending_context() -> str:
     above already says so). Dropped rather than left as a false promise
     that the result is product-specific.
     """
+    from .config import trends_enabled
+
+    if not trends_enabled():
+        return ""
     db_path = settings.project_root / "warehouse" / "local.duckdb"
     if not db_path.exists():
         return ""

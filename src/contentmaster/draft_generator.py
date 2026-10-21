@@ -236,6 +236,10 @@ def _trending_for_prompt() -> str:
     decision (--target-region, see topic_index.load_target); adding "these
     countries search for this most" would quietly compete with it.
     """
+    from .config import trends_enabled
+
+    if not trends_enabled():
+        return ""
     db_path = settings.project_root / "warehouse" / "local.duckdb"
     if not db_path.exists():
         return ""
