@@ -108,8 +108,18 @@ print("7. 七天都有貼文時再跑:什麼都不多做 ✅")
 
 # 下一個 cluster 的 hypothesis 來自最新已決定的分析,並記下是從哪個 cluster 學來的
 H2 = {"id": "hyp-from-analysis", "test": "end with a question", "watch": "replies"}
-modiqo_play.capture_failure(P, CH, "t", "x", analysis={}, checkpoint="7d",
+# 按 disagree 的假設不能被拿去用
+modiqo_play.capture_failure(P, CH, "t", "x", analysis={"human_confirmed": False}, checkpoint="7d",
+    metrics={"post_id": tue, "like_count": 0},
+    trace={"post_id": tue, "next_hypothesis": {"id": "hyp-disagreed", "test": "x", "watch": "likes"}})
+assert modiqo_play.find_best_prior(P, CH)["hypothesis"] is None
+modiqo_play.capture_failure(P, CH, "t", "x", analysis={"human_confirmed": True}, checkpoint="7d",
     metrics={"post_id": tue, "like_count": 0}, trace={"post_id": tue, "next_hypothesis": H2})
+modiqo_play.capture_failure(P, CH, "t", "x", analysis={"human_confirmed": False}, checkpoint="7d",
+    metrics={"post_id": tue, "like_count": 0},
+    trace={"post_id": tue, "next_hypothesis": {"id": "hyp-disagreed-2", "test": "y", "watch": "likes"}})
+assert modiqo_play.find_best_prior(P, CH)["hypothesis"]["id"] == "hyp-from-analysis"
+print("7b. 按 disagree 的 hypothesis 不會被下一個 cluster 用;用的是最近一個按 confirm 的 ✅")
 assert pipeline.run_cluster("doc.rtfd", CH, no_image=True, today=date(2026, 10, 21)) == 0
 c3 = clusters.get(P, CH, 3)
 assert c3["hypothesis_id"] == "hyp-from-analysis" and c3["learned_from"] == 1

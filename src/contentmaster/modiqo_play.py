@@ -255,6 +255,25 @@ def readings_without(channel: str, checkpoint: str, hypothesis_id: str,
     return list(by_post.values())
 
 
+def _latest_confirmed_hypothesis(product_name: str, channel: str) -> dict[str, Any]:
+    """{"hypothesis", "hypothesis_post_id"} from the most recently written
+    history row whose analysis the human confirmed; both None when none."""
+    found: dict[str, Any] = {"hypothesis": None, "hypothesis_post_id": None}
+    if not HISTORY_PATH.exists():
+        return found
+    with HISTORY_PATH.open() as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            if (r.get("product") == product_name and r.get("channel") == channel
+                    and r.get("next_hypothesis")
+                    and (r.get("analysis") or {}).get("human_confirmed") is True):
+                found = {"hypothesis": r["next_hypothesis"], "hypothesis_post_id": r.get("post_id")}
+    return found
+
+
 def find_best_prior(
     product_name: str, channel: str, prefer: tuple[str, ...] = CHECKPOINT_MATURITY_ORDER,
 ) -> dict[str, Any] | None:
@@ -312,7 +331,11 @@ def find_best_prior(
                 "checkpoint": tier,
                 # 2026-10-04: the structured test, so drafting can write a
                 # post that tests it rather than reading it as advice.
-                "hypothesis": record.get("next_hypothesis"),
+                # 2026-10-20: only a hypothesis the human CONFIRMED. Before
+                # this, Disagree still sent its hypothesis into the next
+                # cluster — the latest decided analysis won regardless of
+                # what the human said about it.
+                **_latest_confirmed_hypothesis(product_name, channel),
                 "post_id": record.get("post_id"),
                 # Whether this prior result had a baseline to be judged
                 # against. Without one it is not evidence of a pattern, so

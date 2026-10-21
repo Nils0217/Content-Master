@@ -1652,7 +1652,7 @@ def run_cluster(whitepaper_path: str, channel: str = "bluesky", product_name: st
         h = prior.get("hypothesis")
         learned_from = None
         if h:
-            source = posts.get(prior.get("post_id") or "")
+            source = posts.get(prior.get("hypothesis_post_id") or "")
             learned_from = source["cluster_id"] if source else None
             print(f"[hypothesis] From the latest decided analysis: {h.get('test')}")
         else:

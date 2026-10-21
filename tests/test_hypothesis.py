@@ -228,7 +228,7 @@ from contentmaster import modiqo_play
 entry = {"post_id": "draft-9", "tests_hypothesis_id": "hyp-old", "environment": env}
 trace = pipeline._trace_for(entry, hypothesis=H, reasoning_id="rsn-9")
 modiqo_play.capture_failure("Fluffy roommate", "bluesky", "t", "hypothesis at 7d",
-                            improvement_note=hyp.render(H), analysis={}, checkpoint="7d",
+                            improvement_note=hyp.render(H), analysis={"human_confirmed": True}, checkpoint="7d",
                             metrics={"post_id": "draft-9", "like_count": 0}, trace=trace)
 row = json.loads(modiqo_play.HISTORY_PATH.read_text().splitlines()[-1])
 assert row["post_id"] == "draft-9" and row["tests_hypothesis_id"] == "hyp-old"
