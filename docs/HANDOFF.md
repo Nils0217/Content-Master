@@ -29,7 +29,7 @@
 
 ```
 顧問 A（提 hypothesis）   llama3.2:3b      DISCUSS_MODEL_A
-顧問 B（另提一個）        mistral:latest   DISCUSS_MODEL_B
+顧問 B（另提一個）        gemma3:4b        DISCUSS_MODEL_B   ← 10/23 換掉 mistral
 裁判（只選 A 或 B）       qwen3:4b         DISCUSS_JUDGE_MODEL
 寫草稿/主題/影片腳本       llama3.2:3b      LLM_IMPROVE_MODEL
 寫圖片 prompt            gemma3:4b        IMAGE_PROMPT_MODEL

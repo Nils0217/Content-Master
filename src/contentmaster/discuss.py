@@ -12,7 +12,7 @@ debate between models multiplies cost/latency for real but hard-to-audit
 gains. This is one bounded round — propose, propose, (optionally)
 synthesize — enough for real model diversity without unbounded cost.
 Defaults to the two Ollama models already used elsewhere in this project
-(llama3.2:3b, mistral:latest) so no extra download/setup is needed;
+(llama3.2:3b, gemma3:4b) so no extra download/setup is needed;
 override via DISCUSS_MODEL_A / DISCUSS_MODEL_B if you have
 better/different local models pulled.
 
@@ -39,7 +39,15 @@ from .analysis import AnalysisResult
 
 _ENDPOINT = os.environ.get("LLM_IMPROVE_ENDPOINT", "http://localhost:11434/v1/chat/completions")
 _MODEL_A = os.environ.get("DISCUSS_MODEL_A", "llama3.2:3b")
-_MODEL_B = os.environ.get("DISCUSS_MODEL_B", "mistral:latest")
+# 2026-10-23: gemma3:4b replaced mistral. On the same nine real advisor-B
+# prompts (replayed from plays/_reasoning.jsonl), mistral proposed "a
+# series of troubleshooting posts" six times, usually several changes at
+# once, and was picked by the judge 0/9. gemma3:4b gave a readable,
+# single-focus test 9/9 (if repetitive). granite4.2:8b timed out 9/9 at
+# 240s — an 8B model does not fit this 8GB machine. Families stay distinct:
+# llama (A), gemma (B), qwen (judge). gemma3:4b also reads the images
+# (image_review.py); one model in two roles is fine.
+_MODEL_B = os.environ.get("DISCUSS_MODEL_B", "gemma3:4b")
 # 2026-09-25: a real third model, so the judge is no longer Advisor A
 # marking its own homework. Chosen by running the actual judge prompt
 # through every locally pulled model:
@@ -61,7 +69,7 @@ _MODEL_B = os.environ.get("DISCUSS_MODEL_B", "mistral:latest")
 # proposals, which is what this step already did for free by concatenating
 # them.
 #
-# Also a different family from both advisors (llama3.2, mistral), which
+# Also a different family from both advisors (llama3.2, gemma3), which
 # was the original requirement — a same-family judge mostly agrees with
 # whichever advisor it resembles.
 _JUDGE_MODEL = os.environ.get("DISCUSS_JUDGE_MODEL", "qwen3:4b")
