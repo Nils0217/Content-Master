@@ -101,6 +101,35 @@ class BlueskyPlatform(Platform):
             "display_name": getattr(profile, "display_name", None),
         }
 
+    def get_engagers(self, post_ref: str) -> dict[str, list[str]] | None:
+        client = self._get_client()
+
+        def paged(call, params, items):
+            out, cursor = [], None
+            for _ in range(20):  # 2000 accounts is far past anything this account will see
+                resp = call({**params, "limit": 100, **({"cursor": cursor} if cursor else {})})
+                out += items(resp)
+                cursor = getattr(resp, "cursor", None)
+                if not cursor:
+                    break
+            return out
+
+        try:
+            likers = paged(client.app.bsky.feed.get_likes, {"uri": post_ref},
+                           lambda r: [x.actor.did for x in r.likes])
+            reposters = paged(client.app.bsky.feed.get_reposted_by, {"uri": post_ref},
+                              lambda r: [a.did for a in r.reposted_by])
+            thread = client.app.bsky.feed.get_post_thread({"uri": post_ref, "depth": 1}).thread
+            repliers = [x.post.author.did for x in (getattr(thread, "replies", None) or [])
+                        if getattr(getattr(x, "post", None), "author", None)]
+        except RateLimitExceededError as e:
+            raise PlatformRateLimitError("Bluesky rate limit hit while reading engagers.") from e
+        except NetworkError as e:
+            raise PlatformAPIError(f"Network error reaching Bluesky: {e}") from e
+        except AtProtocolError as e:
+            raise PlatformAPIError(f"Bluesky API error reading engagers: {e}") from e
+        return {"likers": likers, "reposters": reposters, "repliers": repliers}
+
     def account_snapshot(self) -> dict[str, Any]:
         client = self._get_client()
         try:

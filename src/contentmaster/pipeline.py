@@ -79,7 +79,7 @@ from .platforms.base import (
     PostNotFoundError,
 )
 from .platforms.registry import PLATFORMS, get_platform
-from . import product_assets
+from . import image_review, product_assets
 from .product_registry import describe as describe_product, remember as remember_product
 from .publish_failure import PublishFailure, classify as classify_failure
 from .publish_guard import DraftNotPublishable, publish_blockers
@@ -495,10 +495,20 @@ def step4b_generate_image(draft: dict[str, Any], final_text: str,
     def regenerate_fn(p: str) -> bytes | None:
         return image_generator.generate_image(p)
 
+    # 2026-10-22: Gemma looks at the image before the human does, and its
+    # read is said here because a terminal cannot show the picture.
+    check = image_review.review(image_bytes, final_text)
+    if check:
+        print(f"[image check · {check.get('model')}] {check.get('description') or '(no description)'}")
+        for problem in image_review.problems(check):
+            print(f"  ⚠ {problem}")
     approved = review_image(image_bytes, prompt, regenerate_fn=regenerate_fn, draft_id=draft["id"])
     if approved is None:
         audit.log_event("image_generator", "skipped", draft_id=draft["id"])
         return None, ""
+    if approved != image_bytes:  # regenerated during review — the check was of the old one
+        check = image_review.review(approved, final_text)
+    draft.update(image_review.as_labels(check))
     audit.log_event("image_generator", "attached", draft_id=draft["id"], prompt=prompt[:200])
     # Alt text describes the PICTURE, not the post — it used to be the
     # brief truncated to 200 characters, which told a screen-reader user
@@ -623,6 +633,8 @@ def _environment(published: dict[str, Any], channel: str) -> dict[str, Any]:
     if channel in PLATFORMS:
         try:
             env.update(get_platform(channel).account_snapshot())
+            from .stickiness import record_account_snapshot
+            record_account_snapshot(channel, env, source="publish")
         except Exception as e:  # noqa: BLE001 — context only; the post is already live
             audit.log_event("environment", "snapshot_failed", channel=channel,
                              error_type=type(e).__name__, reason=str(e))
@@ -774,7 +786,9 @@ def step6_queue_for_review(product_name: str, channel: str, published: dict[str,
 LABEL_KEYS = ("topic_reason", "characteristics", "test_axis", "test_arm",
               "evidence_used", "evidence_against", "tests_hypothesis_id",
               # 2026-10-07: where the post sits in the cluster design (clusters.py)
-              "cluster_id", "kind", "experiment", "scheduled_for")
+              "cluster_id", "kind", "experiment", "scheduled_for",
+              # 2026-10-22: Gemma's read of the image (image_review.py)
+              "image_description", "image_check")
 
 
 class StaleAnalysis(RuntimeError):
@@ -809,10 +823,16 @@ class PostWasDeleted(RuntimeError):
     """
 
 
-def _reading_from_counts(channel: str, checkpoint: str, real: dict[str, Any]) -> dict[str, Any]:
+def _reading_from_counts(channel: str, checkpoint: str, real: dict[str, Any],
+                        post_ref: str | None = None) -> dict[str, Any]:
     """The one place raw platform counts become a metrics row, shared by
     the checkpoint pull and `contentmaster refresh` so the two can never
     drift into writing differently-shaped rows for the same post.
+
+    2026-10-22: also WHO engaged (`engagers`), for follower stickiness —
+    the share of a post's engagers who had engaged before (stickiness.py).
+    Skipped (no API call) when nobody liked, reposted or replied. None
+    means "could not ask", never "nobody".
     """
     raw = {k: real.get(k) or 0 for k in
            ("like_count", "repost_count", "reply_count", "bookmark_count", "quote_count")}
@@ -834,7 +854,21 @@ def _reading_from_counts(channel: str, checkpoint: str, real: dict[str, Any]) ->
         # weights or gate constants can be honestly calibrated yet, so
         # history has to stay re-runnable against new ones (scoring.py).
         **raw,
+        "engagers": _engagers(channel, post_ref, raw),
     }
+
+
+def _engagers(channel: str, post_ref: str | None, raw: dict[str, Any]) -> dict[str, list[str]] | None:
+    if not any(raw.get(k) for k in ("like_count", "repost_count", "reply_count")):
+        return {"likers": [], "reposters": [], "repliers": []}
+    if not post_ref or channel not in PLATFORMS:
+        return None
+    try:
+        return get_platform(channel).get_engagers(post_ref)
+    except Exception as e:  # noqa: BLE001 — counts are still a valid reading without it
+        audit.log_event(channel, "engagers.unavailable", post_ref=post_ref,
+                         error_type=type(e).__name__, reason=str(e))
+        return None
 
 
 class MetricsUnavailable(RuntimeError):
@@ -867,7 +901,7 @@ def _pull_checkpoint_metrics(entry: dict[str, Any], checkpoint: str) -> dict[str
         try:
             platform = get_platform(channel)
             real = platform.get_post_metrics(post_ref)
-            reading = _reading_from_counts(channel, checkpoint, real)
+            reading = _reading_from_counts(channel, checkpoint, real, post_ref=post_ref)
             audit.log_event(channel, "metrics.pulled", checkpoint=checkpoint, **real)
         except PostNotFoundError as e:
             # Listed before PlatformAPIError on purpose — it is a subclass,
@@ -925,8 +959,9 @@ def _pull_and_analyze(entry: dict[str, Any], checkpoint: str) -> tuple[dict[str,
         from .modiqo_play import readings_without
 
         analysis.hypothesis_result = hyp.evaluate(
-            reasoning.find_hypothesis(tested), metrics,
-            readings_without(channel, checkpoint, tested, exclude_post_ids={entry.get("post_id")}),
+            reasoning.find_hypothesis(tested), entry["post_id"], product_name, channel,
+            [m.get("post_id") for m in readings_without(channel, checkpoint, tested,
+                                                         exclude_post_ids={entry.get("post_id")})],
             entry.get("environment"), checkpoint)
         if analysis.hypothesis_result is None:
             audit.log_event("analysis", "tested_hypothesis.missing", post_id=entry.get("post_id"),
@@ -937,10 +972,27 @@ def _pull_and_analyze(entry: dict[str, Any], checkpoint: str) -> tuple[dict[str,
     strategy = synthesize_strategy(
         product_name, channel, analysis, target=topic_index.load_target(product_name),
         post_id=entry.get("post_id"), checkpoint=checkpoint, post_text=entry.get("final_text", ""),
+        image_note=_image_note(entry),
         category=index.get("category", ""),
         topic_names=[t["topic"] for t in index.get("topics") or [] if t.get("topic")],
     )
     return metrics, analysis, strategy
+
+
+def _image_note(entry: dict[str, Any]) -> str:
+    """One line on the post's image for the text advisors, from Gemma's
+    read. Posts drafted before 2026-10-22 have none stored: their saved
+    image is looked at now (one image-model call) instead."""
+    desc = entry.get("image_description")
+    if not desc:
+        queued = draft_queue._latest_entries().get(entry.get("post_id", "")) or {}
+        path = queued.get("image_path")
+        if path and Path(path).exists():
+            desc = (image_review.review(Path(path).read_bytes(), entry.get("final_text", "")) or {}).get(
+                "description")
+        elif not path:
+            return "The post had no image."
+    return f"The post's image, as described by an image model: {desc.rstrip('. ')}." if desc else ""
 
 
 def _trace_for(entry: dict[str, Any], strategy: Strategy | None = None,
@@ -1130,6 +1182,13 @@ def refresh_metrics() -> int:
         by_ref = {e["post_ref"]: e for e in entries}
         try:
             readings = get_platform(channel).get_post_metrics_batch(list(by_ref))
+            # Follower change is read from these snapshots (stickiness.py).
+            try:
+                from .stickiness import record_account_snapshot
+                record_account_snapshot(channel, get_platform(channel).account_snapshot(),
+                                        source="refresh")
+            except Exception as e:  # noqa: BLE001 — the post readings are still worth taking
+                audit.log_event("account", "snapshot_failed", channel=channel, reason=str(e))
         except (PlatformConfigError, PlatformAPIError) as e:
             # No mock fallback here, unlike the checkpoint pull: a refresh
             # that cannot reach the platform has nothing to say, and
@@ -1147,7 +1206,7 @@ def refresh_metrics() -> int:
                       "marked deleted and no longer polled.")
                 n_deleted += 1
                 continue
-            reading = _reading_from_counts(channel, "refresh", real)
+            reading = _reading_from_counts(channel, "refresh", real, post_ref=post_ref)
             metrics_store.write_metrics(entry["post_id"], channel, reading)
             audit.log_event(channel, "metrics.refreshed", post_id=entry["post_id"], **real)
             n_written += 1
@@ -1435,6 +1494,7 @@ def _run_streamlit(product_name: str, channel: str, drafts: list[dict[str, Any]]
             ext = image_generator.image_format(image_bytes) or "png"
             image_path = str(out_dir / f"{draft['id']}.{ext}")
             Path(image_path).write_bytes(image_bytes)
+            draft.update(image_review.as_labels(image_review.review(image_bytes, draft["text"])))
         audit.log_event("image_generator", "generated_for_queue", draft_id=draft["id"],
                          has_image=bool(image_bytes))
         draft_queue.queue_draft(

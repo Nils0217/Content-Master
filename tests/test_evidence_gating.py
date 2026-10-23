@@ -32,11 +32,11 @@ def mk(hb):
 cold = _proposal_prompt("P", "bluesky", mk(False))
 warm = _proposal_prompt("P", "bluesky", mk(True))
 # 2026-10-04: 沒有「什麼代表錯」—— 沒動的數字代表當下環境不適合,不是點子錯
-assert "TEST:" in cold and "WATCH:" in cold and "WRONG" not in cold
+assert "TEST:" in cold and "follower stickiness" in cold and "WRONG" not in cold
 assert "do not describe any result as proven, improving or declining" in cold
 assert "Trend:" not in cold and "Real performance analysis" not in cold
 assert "Trend:" in warm and "TEST:" not in warm
-print("4. 沒基準線 -> 問要測什麼（TEST/WHY/WATCH）;有基準線 -> 問調整 ✅")
+print("4. 沒基準線 -> 問要測什麼(TEST/WHY,固定看黏著度和追蹤變化);有基準線 -> 問調整 ✅")
 print("   顧問沒有被關掉 —— 冷啟動的 8 篇仍然有方向")
 
 # 2026-10-21 使用者:「無視過期趨勢之類的那些東西」—— 預設關閉,三個來源都回空

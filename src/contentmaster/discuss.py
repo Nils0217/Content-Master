@@ -92,7 +92,7 @@ def _complete(model: str, prompt: str, timeout: int = 90) -> str | None:
 
 
 def _grounding(product_name: str, post_text: str, category: str,
-               topic_names: list[str] | None) -> str:
+               topic_names: list[str] | None, image_note: str = "") -> str:
     """What the account is and what it can write about.
 
     2026-10-04. The advisors used to get the product name and nothing else,
@@ -110,15 +110,21 @@ def _grounding(product_name: str, post_text: str, category: str,
                 "nothing else:\n" + "; ".join(topic_names) + "\n\n")
     if post_text:
         out += f"The post being reviewed said: \"{post_text}\"\n\n"
+    if image_note:
+        # 2026-10-22: images are Gemma's job (image_review.py). Without this
+        # the advisors did not know posts had images and kept proposing one.
+        out += (f"{image_note}\nImages are handled separately by another model. Propose changes to "
+                "the TEXT only — never add, remove or change an image.\n\n")
     return out
 
 
 def _proposal_prompt(
     product_name: str, channel: str, analysis: AnalysisResult, target: dict[str, Any] | None = None,
     post_text: str = "", category: str = "", topic_names: list[str] | None = None,
+    image_note: str = "",
 ) -> str:
     prompt = f"You're advising on the next post for '{product_name}' on {channel}.\n\n"
-    prompt += _grounding(product_name, post_text, category, topic_names)
+    prompt += _grounding(product_name, post_text, category, topic_names, image_note)
     if analysis.has_baseline:
         prompt += (f"Real performance analysis (not a guess): {analysis.evidence}\n"
                    f"Trend: {analysis.trend}.")
@@ -174,15 +180,15 @@ def _proposal_prompt(
         # falsifiers named ad clicks, bounce rate and regional engagement.
         prompt += (
             "\n\nPropose ONE thing worth testing in the next post. Answer with exactly these "
-            "three lines and nothing else:\n"
+            "two lines and nothing else:\n"
             "TEST: one change to how the NEXT POSTS are written or what they are about, concrete "
             "enough that a writer could act on it. The source document is fixed — never propose "
             "editing it; its sections are only what posts can draw on.\n"
             "WHY: one sentence on why it might suit this audience right now\n"
-            "WATCH: the one number that will show whether it suited — "
-            + ", ".join(hyp.METRICS[:-1]) + f" or {hyp.METRICS[-1]}. These four are the only "
-            "numbers this system can see.\n"
-            "There is no right or wrong outcome. If the number does not move, that means the "
+            "Every test is read on the same two numbers, which you do not choose: follower "
+            "stickiness (the share of people engaging with a post who had engaged before) and "
+            "follower change over the week. The goal is people who come back, and new followers.\n"
+            "There is no right or wrong outcome. If the numbers do not move, that means the "
             "change did not suit the conditions at the time, not that the idea was bad.\n"
             "A trend unrelated to what this account writes about is a distraction, not an "
             f"opportunity. The name '{product_name}' is fixed — never propose a rename."
@@ -236,7 +242,7 @@ class Strategy:
 def synthesize_strategy(
     product_name: str, channel: str, analysis: AnalysisResult, target: dict[str, Any] | None = None,
     *, post_id: str | None = None, checkpoint: str | None = None, post_text: str = "",
-    category: str = "", topic_names: list[str] | None = None,
+    category: str = "", topic_names: list[str] | None = None, image_note: str = "",
 ) -> Strategy:
     """The next round's direction. Never raises — a model call failing is
     recorded and shown, so a local-LLM hiccup never takes down the pipeline.
@@ -249,7 +255,7 @@ def synthesize_strategy(
     log = dict(product=product_name, channel=channel, post_id=post_id, checkpoint=checkpoint,
                reasoning_id=rid)
     prompt = _proposal_prompt(product_name, channel, analysis, target, post_text=post_text,
-                              category=category, topic_names=topic_names)
+                              category=category, topic_names=topic_names, image_note=image_note)
     steps: list[dict[str, Any]] = []
     raw: dict[str, str | None] = {}
     for role, model in (("A", _MODEL_A), ("B", _MODEL_B)):
@@ -281,12 +287,9 @@ def _hypothesis(product_name: str, channel: str, raw: dict[str, str | None],
     parsed = {}
     for step in steps:
         step["parsed"] = hyp.parse_hypothesis(step["raw"])
-        # 2026-10-07: a test whose WATCH names no number this system reads
-        # cannot be measured, so it is not a test. Kept in the record (the
-        # step's `parsed` still shows it) but not eligible to be picked — a
-        # real cluster run had the judge pick one, leaving a week of posts
-        # with nothing to read at the end.
-        if step["parsed"] and step["parsed"].get("watch"):
+        # Any proposal with a TEST is eligible: since 2026-10-22 the numbers
+        # it is read on are fixed (hypothesis.WATCH_FIXED), not chosen.
+        if step["parsed"]:
             parsed[step["role"]] = {**step["parsed"], "model": step["model"]}
 
     if not any(raw.values()):
@@ -296,9 +299,8 @@ def _hypothesis(product_name: str, channel: str, raw: dict[str, str | None],
         # Replied, but not in a shape we could read. Said, not swallowed:
         # an empty parse and "nothing to say" must not look the same.
         audit.log_event("discuss", "unparsed", **log)
-        print("[note] Neither advisor gave a test with a readable TEST and WATCH (likes, "
-              "reposts, replies or bookmarks) — no hypothesis this round. Both replies are kept "
-              "in plays/_reasoning.jsonl.")
+        print("[note] Neither advisor gave a readable TEST line — no hypothesis this round. "
+              "Both replies are kept in plays/_reasoning.jsonl.")
         return None, _unmerged(raw), "none_usable"
 
     if len(parsed) == 1 or not _JUDGE_ENABLED:

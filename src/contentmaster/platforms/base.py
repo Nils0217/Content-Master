@@ -240,6 +240,15 @@ class Platform(ABC):
         substitute made-up numbers for it.
         """
 
+    def get_engagers(self, post_ref: str) -> dict[str, list[str]] | None:
+        """Who engaged with a post: {"likers", "reposters", "repliers"}, each
+        a list of account ids. None when this platform cannot say — which
+        is different from an empty list (nobody engaged). Bookmarks are
+        private on Bluesky and cannot be listed. Used for follower
+        stickiness (stickiness.py).
+        """
+        return None
+
     def account_snapshot(self) -> dict[str, Any]:
         """The account's size right now — {"followers", "following",
         "posts"} — recorded with every post as part of the conditions it

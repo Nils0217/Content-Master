@@ -32,6 +32,11 @@ from typing import Any
 # scoring.engagement_score). Order is the order they are named in prompts.
 METRICS = ("likes", "reposts", "replies", "bookmarks")
 
+# 2026-10-22, decided with the user: every hypothesis is read on the same
+# two numbers, and no model chooses (stickiness.py). Advisors used to pick a
+# WATCH metric per test; they no longer do.
+WATCH_FIXED = "follower stickiness + follower change"
+
 # Words a model uses for each number. "shares" is how two of four real
 # replies described reposts.
 _METRIC_WORDS = (
@@ -92,7 +97,8 @@ def parse_hypothesis(text: str | None) -> dict[str, Any] | None:
     return {
         "test": f["TEST"],
         "why": f.get("WHY", ""),
-        "watch": watch_metric(f.get("WATCH", "")),
+        # Fixed, whatever the model wrote; a WATCH line it adds anyway is kept.
+        "watch": WATCH_FIXED,
         "watch_raw": f.get("WATCH", ""),
     }
 
@@ -175,9 +181,8 @@ def review_view(h: dict[str, Any] | None, row: dict[str, Any] | None) -> dict[st
                 view["other"] = f"Advisor {s['role']} proposed: {summary_line(s['parsed'])}"
     elif row:
         view["problem"] = {
-            "none_usable": "Neither advisor gave a test with a readable TEST and a WATCH this "
-                           "system can measure — no hypothesis this round. Their replies are "
-                           "under the steps below.",
+            "none_usable": "Neither advisor gave a readable TEST line — no hypothesis this "
+                           "round. Their replies are under the steps below.",
             "no_response": "Neither advisor responded.",
         }.get(row.get("outcome", ""), "")
     return view
@@ -195,43 +200,55 @@ def review_view(h: dict[str, Any] | None, row: dict[str, Any] | None) -> dict[st
 # Never "right" or "wrong". "moved" or "did not move under these
 # conditions" — and with one testing post it is a signal, not proof.
 
-_COUNT_FIELD = {"likes": "like_count", "reposts": "repost_count",
-                "replies": "reply_count", "bookmarks": "bookmark_count"}
-
 # Fewer comparison posts than this and there is nothing to set the result
 # beside — reported as such rather than compared against one stray post.
 MIN_COMPARISON_POSTS = 2
 
 
-def evaluate(h: dict[str, Any] | None, metrics: dict[str, Any],
-             comparison: list[dict[str, Any]], environment: dict[str, Any] | None,
+def evaluate(h: dict[str, Any] | None, post_id: str, product: str, channel: str,
+             comparison_post_ids: list[str], environment: dict[str, Any] | None,
              checkpoint: str) -> dict[str, Any] | None:
     """The result of a test, or None when the post was not testing anything.
 
-    `comparison` is raw count dicts for posts at the same checkpoint that
-    did not test this hypothesis (modiqo_play.readings_without).
+    2026-10-22: read on the two fixed numbers (WATCH_FIXED). Stickiness of
+    the testing post vs the median stickiness of posts that did not test it
+    (`comparison_post_ids`, from modiqo_play.readings_without). Follower
+    change is the week's, for the cluster the post belongs to — reported
+    beside the comparison, never split onto this one post.
     """
     if not h:
         return None
-    watch = h.get("watch")
+    from . import clusters, posts
+    from .stickiness import follower_change, stickiness
+
+    mine = stickiness(post_id, product, channel)
+    others = [v for v in (stickiness(pid, product, channel)["value"] for pid in comparison_post_ids)
+              if v is not None]
     result: dict[str, Any] = {
-        "hypothesis_id": h.get("id"), "test": h.get("test", ""), "watch": watch,
+        "hypothesis_id": h.get("id"), "test": h.get("test", ""), "watch": WATCH_FIXED,
         "checkpoint": checkpoint, "environment": environment or {},
-        "value": None, "comparison_n": len(comparison), "comparison_median": None,
+        "stickiness": mine["value"], "engagers": mine["engagers"], "returning": mine["returning"],
+        "comparison_n": len(others), "comparison_median": None, "follower_change": None,
     }
-    if not watch or watch not in _COUNT_FIELD:
-        result["outcome"] = "unreadable"
-        return result
-    field = _COUNT_FIELD[watch]
-    result["value"] = int(metrics.get(field) or 0)
-    others = sorted(int(c.get(field) or 0) for c in comparison)
-    if len(others) < MIN_COMPARISON_POSTS:
+    row = posts.get(post_id) or {}
+    c = clusters.get(product, channel, row.get("cluster_id") or 0) if row.get("cluster_id") else None
+    if c and c.get("week_start"):
+        from datetime import date, timedelta
+        start = date.fromisoformat(c["week_start"])
+        result["follower_change"] = follower_change(
+            channel, start.isoformat(), (start + timedelta(days=8)).isoformat())
+    if not mine["known"]:
+        result["outcome"] = "unknown"           # no reading could ask who engaged
+    elif mine["value"] is None:
+        result["outcome"] = "no_engagers"       # nobody liked, reposted or replied
+    elif len(others) < MIN_COMPARISON_POSTS:
         result["outcome"] = "no_comparison"
-        return result
-    mid = len(others) // 2
-    median = others[mid] if len(others) % 2 else (others[mid - 1] + others[mid]) / 2
-    result["comparison_median"] = median
-    result["outcome"] = "moved" if result["value"] > median else "did_not_move"
+    else:
+        srt = sorted(others)
+        mid = len(srt) // 2
+        median = srt[mid] if len(srt) % 2 else (srt[mid - 1] + srt[mid]) / 2
+        result["comparison_median"] = median
+        result["outcome"] = "moved" if mine["value"] > median else "did_not_move"
     return result
 
 
@@ -241,16 +258,21 @@ def result_line(r: dict[str, Any] | None) -> str:
         return ""
     head = f"Last test — {r.get('test', '')}. "
     conditions = describe_environment(r.get("environment"))
+    fc = r.get("follower_change") or {}
+    week = (f" Followers that week: {fc['change']:+d} ({fc['from']} → {fc['to']})."
+            if fc.get("change") is not None else " Followers that week: not enough snapshots yet.")
     outcome = r.get("outcome")
-    if outcome == "unreadable":
-        return head + "It named no number this system can read, so there is nothing to check."
-    watched = f"{r['watch']}: {r['value']} at {r['checkpoint']}"
+    if outcome == "unknown":
+        return head + "No reading could ask who engaged with it, so stickiness is unknown." + week
+    if outcome == "no_engagers":
+        return head + f"Nobody liked, reposted or replied, so there is no stickiness to read. Conditions: {conditions}." + week
+    sticky = f"stickiness {r['stickiness']:.0%} ({r['returning']} of {r['engagers']} engagers had engaged before)"
     if outcome == "no_comparison":
-        return (head + f"Watched {watched}. Fewer than {MIN_COMPARISON_POSTS} other posts at "
-                f"this checkpoint to set it beside — no reading yet. Conditions: {conditions}.")
-    beside = f"median {r['comparison_median']:g} across {r['comparison_n']} posts that did not test it"
+        return (head + f"{sticky}. Fewer than {MIN_COMPARISON_POSTS} other posts with engagers to set it "
+                f"beside — no reading yet. Conditions: {conditions}." + week)
+    beside = f"median {r['comparison_median']:.0%} across {r['comparison_n']} posts that did not test it"
     if outcome == "moved":
-        return (head + f"Watched {watched} vs {beside} — it moved, under: {conditions}. "
-                "One post is a signal, not proof.")
-    return (head + f"Watched {watched} vs {beside} — it did not move under: {conditions}. "
-            "That describes those conditions, not the idea.")
+        return (head + f"{sticky} vs {beside} — it moved, under: {conditions}. "
+                "One post is a signal, not proof." + week)
+    return (head + f"{sticky} vs {beside} — it did not move under: {conditions}. "
+            "That describes those conditions, not the idea." + week)

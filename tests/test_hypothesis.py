@@ -34,24 +34,24 @@ JUDGE_REAL = ("PICK: A\nREASON: It changes a single clear thing (introduction fo
 
 h = hyp.parse_hypothesis(REAL["llama_question"])
 assert h["test"] == "asking a question in the introduction instead of making a statement", h
-assert h["watch"] == "likes" and h["watch_raw"] == "20% increase in likes", h
-assert hyp.parse_hypothesis(REAL["llama_blank_lines"])["watch"] == "likes"
-assert hyp.parse_hypothesis(REAL["mistral_shares"])["watch"] == "reposts"
-assert hyp.parse_hypothesis(REAL["mistral_two"])["watch"] == "likes"
+# 2026-10-22: 看什麼是固定的(黏著度 + 追蹤變化量);模型自己寫的 WATCH 只留原文
+assert h["watch"] == hyp.WATCH_FIXED and h["watch_raw"] == "20% increase in likes", h
+for k in REAL:
+    assert hyp.parse_hypothesis(REAL[k])["watch"] == hyp.WATCH_FIXED
 assert hyp.parse_hypothesis(REAL["llama_blank_lines"])["why"].startswith("This might suit")
-print("1. 四種真實回覆都解析得出 TEST/WHY/WATCH;'shares' 認成 reposts,兩個數字取第一個 ✅")
+print("1. 四種真實回覆都解析得出 TEST/WHY;要看的數字固定,模型寫的 WATCH 只保留原文 ✅")
 
 for deco in ("**TEST:** x\n**WATCH:** likes", "1. TEST: x\n2. WATCH: likes", "- TEST: x\n- WATCH: likes",
              "> TEST: x\n> WATCH: likes", "-- TEST: x\n-- WATCH: likes", "Test: x\nWatch: likes"):
     got = hyp.parse_hypothesis(deco)
-    assert got and got["test"] == "x" and got["watch"] == "likes", (deco, got)
+    assert got and got["test"] == "x" and got["watch_raw"] == "likes", (deco, got)
 print("2. 粗體、編號、bullet、引號、'-- '、小寫欄位名都不影響 ✅")
 
 assert hyp.watch_metric("click-through rate and bounce rate") is None
 assert hyp.watch_metric("engagement in Romania") is None
-assert hyp.parse_hypothesis("TEST: x\nWATCH: ad clicks")["watch"] is None
-assert "not a number this system reads" in hyp.render(hyp.parse_hypothesis("TEST: x\nWATCH: ad clicks"))
-print("3. 系統讀不到的數字（點擊、跳出率、地區）不會被當成 like 等;原文保留並標明 ✅")
+assert hyp.parse_hypothesis("TEST: x\nWATCH: ad clicks")["watch"] == hyp.WATCH_FIXED
+assert hyp.parse_hypothesis("TEST: x")["watch"] == hyp.WATCH_FIXED      # 不寫 WATCH 也成立
+print("3. 模型寫什麼數字都不影響:一律看黏著度 + 追蹤變化量 ✅")
 
 assert hyp.parse_hypothesis("Try a black cat adoption story. It could work because...") is None
 assert hyp.parse_hypothesis("") is None and hyp.parse_hypothesis(None) is None
@@ -72,15 +72,18 @@ def mk(has_baseline):
 
 cold = d._proposal_prompt("Fluffy roommate", "bluesky", mk(False), post_text="Introducing Fluffy",
                           topic_names=["Step 1: Establish Trust", "Comparing lifestyle risks"])
-assert "TEST:" in cold and "WHY:" in cold and "WATCH:" in cold
+assert "TEST:" in cold and "WHY:" in cold and "WATCH:" not in cold
 assert "WRONG" not in cold and "wrong" not in cold.replace("no right or wrong", "")
-assert "likes, reposts, replies or bookmarks" in cold
+assert "follower stickiness" in cold and "follower change" in cold and "you do not choose" in cold
 assert "Step 1: Establish Trust; Comparing lifestyle risks" in cold
 assert 'The post being reviewed said: "Introducing Fluffy"' in cold
 assert "You know nothing about who follows this account" in cold
 warm = d._proposal_prompt("Fluffy roommate", "bluesky", mk(True))
 assert "Trend:" in warm and "TEST:" not in warm
-print("6. 沒基準線:問 TEST/WHY/WATCH,沒有「什麼代表錯」,只能選四個數字,有主題清單和貼文原文 ✅")
+img = d._proposal_prompt("Fluffy roommate", "bluesky", mk(False), post_text="x",
+                         image_note="The post's image, as described by an image model: a ginger cat.")
+assert "a ginger cat" in img and "TEXT only" in img and "never add, remove or change an image" in img
+print("6. 沒基準線:問 TEST/WHY,固定看黏著度和追蹤變化;有主題清單、貼文原文、Gemma 的圖片描述,只准改文字 ✅")
 
 
 # --- synthesize_strategy:裁判只選,不改寫;每一步都存 ---
@@ -138,21 +141,19 @@ assert s.hypothesis["picked"] == "B" and reasoning.load(s.reasoning_id)["outcome
 assert len(reasoning.load(s.reasoning_id)["steps"]) == 2        # 只有一個可用,不叫裁判
 print("11. 只有一位顧問可用 -> 直接用它,不浪費一次裁判 ✅")
 
-# 2026-10-07 真實 cluster 實跑:裁判選了一個 WATCH 讀不到的假設
-fake({d._MODEL_A: "TEST: use only one section\nWHY: focus\nWATCH: engagement with the section",
+# 2026-10-22: 看的數字固定之後,沒寫 WATCH 的提案也能參選
+fake({d._MODEL_A: "TEST: open with a question\nWHY: invites replies",
       d._MODEL_B: REAL["mistral_two"], d._JUDGE_MODEL: "PICK: A\nREASON: r"})
 s = d.synthesize_strategy("P", "bluesky", mk(False), post_id="draft-7", checkpoint="7d")
-assert s.hypothesis["picked"] == "B" and s.hypothesis["watch"] == "likes"
-row = reasoning.load(s.reasoning_id)
-assert row["outcome"] == "only_one_usable" and row["steps"][0]["parsed"]["test"] == "use only one section"
-print("11b. WATCH 讀不到數字的提案不能參選(紀錄照留),量不到的測試不算測試 ✅")
+assert s.hypothesis["picked"] == "A" and reasoning.load(s.reasoning_id)["outcome"] == "picked"
+print("11b. 只寫 TEST/WHY 的提案照樣能參選(看什麼由系統固定)✅")
 
 # --- 兩個審核介面共用的畫面 ---
 fake({d._MODEL_A: REAL["llama_question"], d._MODEL_B: REAL["mistral_shares"],
       d._JUDGE_MODEL: "PICK: A\nREASON: r"})
 s = d.synthesize_strategy("P", "bluesky", mk(False), post_id="draft-6", checkpoint="7d")
 v = hyp.review_view(s.hypothesis, reasoning.load(s.reasoning_id))
-assert v["headline"].startswith("Test: asking a question") and "Watch: likes" in v["headline"]
+assert v["headline"].startswith("Test: asking a question") and f"Watch: {hyp.WATCH_FIXED}" in v["headline"]
 assert v["picked"].startswith(f"Advisor A ({d._MODEL_A}): r")
 assert v["other"].startswith("Advisor B proposed: Test: Incorporate")
 assert len(v["steps"]) == 3 and v["steps"][2]["label"].startswith("Judge")
@@ -240,25 +241,47 @@ assert prior["has_baseline"] is False
 print("17. history 一列就看得到:哪篇、測了哪個假設、當時環境、下一篇要測什麼、每一步在哪 ✅")
 print("    下一篇寫草稿時讀得到那個假設 ✅")
 
-# --- 測完要收尾:回頭看那個測試指定要看的數字（2026-10-05）---
-Hl = {"id": "hyp-L", "test": "open with a question", "watch": "likes"}
-others = [{"like_count": 0}, {"like_count": 0}, {"like_count": 1}]
-r = hyp.evaluate(Hl, {"like_count": 2}, others, env, "7d")
-assert r["outcome"] == "moved" and r["value"] == 2 and r["comparison_median"] == 0 and r["comparison_n"] == 3
-r0 = hyp.evaluate(Hl, {"like_count": 0}, others, env, "7d")
-assert r0["outcome"] == "did_not_move"
-assert hyp.evaluate(Hl, {"like_count": 5}, [{"like_count": 0}], env, "7d")["outcome"] == "no_comparison"
-assert hyp.evaluate({**Hl, "watch": None}, {}, others, env, "7d")["outcome"] == "unreadable"
-assert hyp.evaluate(None, {}, others, env, "7d") is None
-assert hyp.evaluate({**Hl, "watch": "replies"}, {"reply_count": 1, "like_count": 0}, others, env, "7d")["outcome"] == "moved"
-print("18. 看的是測試指定的那個數字,不是總分;比的是同一檢查點、沒測這個假設的貼文的中位數 ✅")
+# --- 測完要收尾:看黏著度(回頭互動者比例),附那週的追蹤變化(2026-10-22)---
+from contentmaster import metrics_store, posts, clusters
+from contentmaster import stickiness as stk
+from datetime import date
+Hl = {"id": "hyp-L", "test": "open with a question", "watch": hyp.WATCH_FIXED}
+def published(pid, when, engagers):
+    posts.register(pid, "Fluffy roommate", "bluesky", cluster_id=1, kind="cluster", experiment=False)
+    posts.update(pid, status="published", published_at=when)
+    if engagers is not None:
+        metrics_store.write_metrics(pid, "bluesky", {"like_count": len(engagers),
+            "engagers": {"likers": sorted(engagers), "reposters": [], "repliers": []}})
+clusters.create("Fluffy roommate", "bluesky", date(2026, 10, 12), Hl, None)
+published("old1", "2026-10-12T18:00:00+00:00", {"A", "B"})
+published("old2", "2026-10-13T18:00:00+00:00", {"C"})
+published("cmp1", "2026-10-14T18:00:00+00:00", {"A"})          # 1/1 回頭 → 100%
+published("cmp2", "2026-10-15T18:00:00+00:00", {"E"})          # 0/1 → 0%
+published("hit", "2026-10-16T18:00:00+00:00", {"A", "B"})      # 2/2 → 100%
+published("miss", "2026-10-16T19:00:00+00:00", {"Y", "Z"})     # 0/2 → 0%
+published("nobody", "2026-10-17T18:00:00+00:00", set())
+published("noread", "2026-10-17T19:00:00+00:00", None)
+assert stk.stickiness("hit", "Fluffy roommate", "bluesky") == {"value": 1.0, "engagers": 2, "returning": 2,
+                                                               "known": True, "unknown_prior": 0}
+for snap in ((0, "2026-10-12T17:00:00+00:00"), (2, "2026-10-15T00:00:00+00:00"), (3, "2026-10-19T09:00:00+00:00")):
+    with stk.ACCOUNT_PATH.open("a") as fh:
+        fh.write(json.dumps({"ts": snap[1], "channel": "bluesky", "followers": snap[0]}) + "\n")
+r = hyp.evaluate(Hl, "hit", "Fluffy roommate", "bluesky", ["cmp1", "cmp2"], env, "7d")
+assert r["outcome"] == "moved" and r["stickiness"] == 1.0 and r["comparison_median"] == 0.5, r
+assert r["follower_change"]["change"] == 3 and r["follower_change"]["from"] == 0
+r0 = hyp.evaluate(Hl, "miss", "Fluffy roommate", "bluesky", ["cmp1", "cmp2"], env, "7d")
+assert r0["outcome"] == "did_not_move" and r0["stickiness"] == 0.0
+assert hyp.evaluate(Hl, "nobody", "Fluffy roommate", "bluesky", ["cmp1", "cmp2"], env, "7d")["outcome"] == "no_engagers"
+assert hyp.evaluate(Hl, "noread", "Fluffy roommate", "bluesky", ["cmp1", "cmp2"], env, "7d")["outcome"] == "unknown"
+assert hyp.evaluate(Hl, "hit", "Fluffy roommate", "bluesky", ["cmp1"], env, "7d")["outcome"] == "no_comparison"
+assert hyp.evaluate(None, "hit", "Fluffy roommate", "bluesky", [], env, "7d") is None
+print("18. 黏著度 = 互動者裡以前互動過的比例;沒人互動是「沒有黏著度」不是 0;讀不到誰互動是「未知」;追蹤變化看整週 ✅")
 
 for x in (r, r0):
     line = hyp.result_line(x).lower()
     assert "wrong" not in line and "fail" not in line, line
-    assert "0 followers" in line, line
+    assert "0 followers" in line and "followers that week: +3 (0 → 3)" in line, line
 assert "signal, not proof" in hyp.result_line(r)
-assert "describes those conditions, not the idea" in hyp.result_line(r0)
 print("19. 結果只說「動了 / 在這些條件下沒動」,附上發文環境;沒有對錯 ✅")
 
 # history 讀比較對象:排除測同一個假設的貼文,也排除自己
@@ -274,22 +297,26 @@ print("20. 比較對象排除「也在測這個假設的」和「這篇自己」
 reasoning.record("rsn-L", post_id="p0", checkpoint="7d", product="Fluffy roommate", channel="bluesky",
                  mode="hypothesis", steps=[], outcome="picked", result_text="", hypothesis=Hl)
 modiqo_play.capture_failure("Fluffy roommate", "bluesky", "t", "x", analysis={}, checkpoint="7d",
-    metrics={"post_id": "p4", "like_count": 0}, trace={"post_id": "p4"})
-pipeline._pull_checkpoint_metrics = lambda entry, cp: {"post_id": "tester", "like_count": 3,
-    "repost_count": 0, "reply_count": 0, "bookmark_count": 0, "engagement_score": 3.0}
+    metrics={"post_id": "cmp1", "like_count": 1}, trace={"post_id": "cmp1"})
+modiqo_play.capture_failure("Fluffy roommate", "bluesky", "t", "x", analysis={}, checkpoint="7d",
+    metrics={"post_id": "cmp2", "like_count": 1}, trace={"post_id": "cmp2"})
+pipeline._pull_checkpoint_metrics = lambda entry, cp: {"post_id": "hit", "like_count": 2,
+    "repost_count": 0, "reply_count": 0, "bookmark_count": 0, "engagement_score": 2.0}
 prompts = fake({d._MODEL_A: REAL["llama_question"], d._MODEL_B: REAL["mistral_two"],
                 d._JUDGE_MODEL: "PICK: A\nREASON: r"})
 pipeline.synthesize_strategy = d.synthesize_strategy
-tester = {"post_id": "tester", "product": "Fluffy roommate", "channel": "bluesky",
-          "final_text": "Ever wonder why?", "tests_hypothesis_id": "hyp-L", "environment": env}
+tester = {"post_id": "hit", "product": "Fluffy roommate", "channel": "bluesky",
+          "final_text": "Ever wonder why?", "tests_hypothesis_id": "hyp-L", "environment": env,
+          "image_description": "a ginger cat on a porch"}
 _, a_res, strat = pipeline._pull_and_analyze(tester, "7d")
-assert a_res.hypothesis_result["outcome"] == "moved" and a_res.hypothesis_result["value"] == 3
+assert a_res.hypothesis_result["outcome"] == "moved" and a_res.hypothesis_result["stickiness"] == 1.0
 assert "RESULT OF THE TEST THIS POST WAS RUNNING" in prompts[0][1] and "it moved" in prompts[0][1]
+assert "a ginger cat on a porch" in prompts[0][1] and "TEXT only" in prompts[0][1]
 assert pipeline._trace_for(tester, strat, hypothesis_result=a_res.hypothesis_result)["hypothesis_result"]["outcome"] == "moved"
 assert a_res.as_dict()["hypothesis_result"]["hypothesis_id"] == "hyp-L"
 _, plain, _ = pipeline._pull_and_analyze({**tester, "tests_hypothesis_id": None}, "7d")
 assert plain.hypothesis_result is None
-print("21. 從頭到尾:測了假設的貼文,7d 分析讀出結果、寫進分析和 history、顧問看得到;沒測的不多出東西 ✅")
+print("21. 從頭到尾:測了假設的貼文,7d 分析讀出黏著度結果、寫進分析和 history,顧問看得到結果和圖片描述 ✅")
 
 app = (Path(__file__).resolve().parent.parent / "streamlit_app.py").read_text()
 import contentmaster.analysis as an
