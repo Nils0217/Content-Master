@@ -1596,6 +1596,15 @@ def launch_streamlit() -> None:
 
     url = "http://localhost:8501"
 
+    # 2026-10-22: never from a test or a check run against a scratch data
+    # root. Two test suites reach this through _run_streamlit, and every
+    # `run_tests.sh` popped a browser tab — and could restart the user's
+    # real review page — while they were working.
+    if settings.is_isolated_data_root:
+        print("[review page] Not opened — this run writes to an isolated data root "
+              f"({settings.data_root}).")
+        return
+
     try:
         with socket.create_connection(("localhost", 8501), timeout=0.5):
             running = True
