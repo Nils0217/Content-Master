@@ -40,7 +40,11 @@ from .config import settings
 # hypothesis the judge picked and did not rewrite, and every model step is
 # kept in plays/_reasoning.jsonl. Entries before it hold a judge's
 # rewritten "final strategy" with the test dropped.
-ANALYSIS_SCHEMA = 3
+# Version 4 (2026-10-22): no Google Trends in the advisors' prompt, every
+# hypothesis read on stickiness + follower change (no chosen WATCH), and
+# the post's image described by Gemma. Version-3 entries proposed tests
+# from stale trends and named their own metric.
+ANALYSIS_SCHEMA = 4
 
 # Shown by both review surfaces and raised by the decision path, so the
 # three say the same thing. See .claude/skills/two-review-surfaces.
