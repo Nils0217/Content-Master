@@ -100,6 +100,17 @@ def print_status() -> None:
     from .scheduler import upcoming
 
     sched = upcoming()
+    # 2026-10-25: a post an hour past its time and still not out means the
+    # Mac was off or the environment broke — said first, not buried.
+    from datetime import datetime, timedelta
+    now = datetime.now().astimezone()
+    overdue = [r for r in sched if r.get("scheduled_at")
+               and datetime.fromisoformat(r["scheduled_at"]) < now - timedelta(hours=1)]
+    if overdue:
+        print("\n!! OVERDUE — scheduled but not published (Mac asleep/off, or the environment "
+              "is broken). Run `contentmaster publish-due` to send them now:")
+        for r in overdue:
+            print(f"  #{r.get('natural_id')}  due {str(r['scheduled_at'])[:16].replace('T', ' ')}")
     print("\n" + ("SCHEDULED TO PUBLISH" if sched else "SCHEDULED TO PUBLISH: none"))
     for r in sched:
         print(f"  #{r.get('natural_id')}  {str(r.get('scheduled_at'))[:16].replace('T', ' ')}  "

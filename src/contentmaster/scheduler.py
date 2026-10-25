@@ -191,11 +191,14 @@ def _release_lock() -> None:
 
 def agent_plist(times: list[str]) -> dict[str, Any]:
     """The agent for these HH:MM times — one StartCalendarInterval each."""
-    exe = Path(sys.executable).parent / "contentmaster"
+    # Through a shell wrapper, not the venv directly: if the venv's Python
+    # is gone (it was, 2026-10-25), the wrapper raises a notification
+    # instead of the post silently not going out.
+    wrapper = settings.project_root / "scripts" / "publish_due.sh"
     logs = settings.project_root / "logs"
     return {
         "Label": AGENT_LABEL,
-        "ProgramArguments": [str(exe), "publish-due"],
+        "ProgramArguments": ["/bin/sh", str(wrapper)],
         "WorkingDirectory": str(settings.project_root),
         "StartCalendarInterval": [{"Hour": int(t[:2]), "Minute": int(t[3:])} for t in sorted(times)],
         "StandardOutPath": str(logs / "publish.log"),

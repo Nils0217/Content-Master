@@ -53,3 +53,4 @@ product_assets/
 # src/contentmaster/video_generator.py). Generated output, and an mp4 per
 # post would bloat the repo fast.
 generated_videos/
+logs/

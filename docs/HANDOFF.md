@@ -246,4 +246,9 @@ ID 規則:`post_id` 新貼文是完整 UUID(舊的是 `draft-xxxxxxxx`)。`natur
 
 **啟發式門檻是為這一份白皮書調的**(`MAX_HEADING_WORDS = 12` 等)。別人的文件靠第 1 層或人撿回,不是調數字。
 
+**`.venv` 連到 Homebrew 的 python@3.14。** 2026-10-24 晚上它被移除(原因不明,使用者沒跑 brew),
+所有指令和排程發佈都靜靜壞掉。已重裝並標成「主動安裝」(autoremove 不會再拿走)。**不准在沒問過使用者的情況下
+跑 brew uninstall / autoremove / cleanup / upgrade。** 排程發佈經過 `scripts/publish_due.sh`:環境壞了會跳 macOS 通知;
+`contentmaster status` 會列出過期沒發的貼文。看到 `.venv/bin/python` 找不到,先查 `ls /opt/homebrew/Cellar | grep python`。
+
 **`.env` 有憑證**(Bluesky、Cloudflare、Cognee 密碼)。不要印出來、不要寫進任何文件。

@@ -84,7 +84,8 @@ print("5. 同時跑兩個發佈:只有一個會發;程序死掉留下的舊鎖�
 # --- Mac 的排程設定 ---
 pl = scheduler.agent_plist(["18:00", "09:30"])
 assert pl["StartCalendarInterval"] == [{"Hour": 9, "Minute": 30}, {"Hour": 18, "Minute": 0}]
-assert pl["ProgramArguments"][-1] == "publish-due" and pl["ProgramArguments"][0].endswith("/contentmaster")
+assert pl["ProgramArguments"][0] == "/bin/sh" and pl["ProgramArguments"][1].endswith("scripts/publish_due.sh")
+assert Path(pl["ProgramArguments"][1]).exists()
 assert pl["RunAtLoad"] is False and pl["Label"] == "com.contentmaster.publish"
 assert scheduler.sync_agent() == "skipped (isolated data root)"
 after = scheduler.AGENT_PATH.read_bytes() if scheduler.AGENT_PATH.exists() else None
