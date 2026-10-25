@@ -16,6 +16,13 @@ pipeline.topic_index.load_index = lambda p: {"topics": TOPICS, "category": "A do
 pipeline.launch_streamlit = lambda: None
 pipeline.step5_publish = lambda *a, **k: (_ for _ in ()).throw(AssertionError("cluster 核准不該發佈"))
 pipeline._resolve_product_name = lambda given, wp: P
+# 角色檢查:測試裡不碰真實模型。預設全部「站對邊」,個別測試再改
+from contentmaster import arm_check
+arm_side = {"answer": None}
+def fake_check(text, test):
+    ans = arm_side["answer"](text) if arm_side["answer"] else None
+    return {"makes_change": ans, "raw": "", "model": "fake"}
+arm_check.makes_change = fake_check
 
 # 顧問和裁判:用 2026-10-04 真實模型的原樣回覆
 A = ("TEST: asking a question in the introduction instead of making a statement\n"
@@ -171,4 +178,54 @@ gen.revise_post = lambda *a, **k: None
 assert gen._fit_to_channel("P", "x" * 302, "bluesky") is None
 assert gen._fit_to_channel("P", "fits fine", "bluesky") == "fits fine"
 print("12. 太長的草稿先請模型縮短一次;縮不下來才丟,而且會說;本來就合格的不動 ✅")
+
+# --- 角色檢查(2026-10-24)---
+# 真實 Gemma 回覆
+assert arm_check.parse("MAKES_CHANGE: yes") is True and arm_check.parse("MAKES_CHANGE: no") is False
+assert arm_check.parse("**MAKES_CHANGE:** Yes.") is True and arm_check.parse("No") is False
+assert arm_check.parse("It depends on the reader.") is None
+assert arm_check.verdict(True, {"makes_change": True}) == "wrong_side"
+assert arm_check.verdict(False, {"makes_change": False}) == "wrong_side"
+assert arm_check.verdict(True, {"makes_change": False}) == "ok"
+assert arm_check.verdict(False, {"makes_change": None}) == "unchecked"
+assert "FAILS" in arm_check.describe(True, {"makes_change": True})
+print("13. 角色檢查:Gemma 的真實回覆讀得出來;experiment 做了改變、主要方向沒做改變 → 站錯邊 ✅")
+
+# experiment 第一輪寫出有問句的(像真實週四那篇),要被丟掉、重寫
+calls = {"n": 0}
+def asks(text):
+    calls["n"] += 1
+    return calls["n"] <= 1          # 第一篇被判「有做改變」,之後的都沒有
+arm_side["answer"] = asks
+kept = pipeline._on_the_right_side([{"text": "how do you establish trust?"}, {"text": "Let it come to you."}],
+                                   True, "include at least one question")
+assert [k["text"] for k in kept] == ["Let it come to you."]
+assert kept[0]["arm_check"]["verdict"] == "ok"
+arm_side["answer"] = lambda t: None
+kept = pipeline._on_the_right_side([{"text": "x"}], False, "t")
+assert kept and kept[0]["arm_check"]["verdict"] == "unchecked"
+print("14. 站錯邊的草稿在進審核頁前就丟掉;檢查不了的留著、標「沒檢查到」讓人判斷 ✅")
+
+# 整個 cluster:experiment 第一次全站錯邊 → 重試補齊,審核頁看到的都站對邊
+shutil.rmtree(R / "plays", ignore_errors=True)
+first = {"done": False}
+orig = pipeline._on_the_right_side
+def flaky(drafts, is_exp, test):
+    if is_exp and not first["done"]:
+        first["done"] = True
+        arm_side["answer"] = lambda t: True   # experiment 第一批:站錯邊
+        out = orig(drafts, is_exp, test)
+        arm_side["answer"] = lambda t: not is_exp
+        return out
+    arm_side["answer"] = lambda t: not is_exp
+    return orig(drafts, is_exp, test)
+pipeline._on_the_right_side = flaky
+assert pipeline.run_cluster("doc.rtfd", CH, no_image=True, today=date(2026, 11, 4)) == 0
+c = [c for c in clusters.for_product(P, CH) if c["week_start"] == "2026-11-09"][0]
+rows = posts.in_cluster(P, CH, c["cluster_id"])
+q = draft_queue._latest_entries()
+assert len(rows) == 7 and all(q[r["post_id"]]["arm_check"]["verdict"] == "ok" for r in rows), \
+    [q[r["post_id"]].get("arm_check") for r in rows]
+pipeline._on_the_right_side = orig
+print("15. 整週:experiment 第一批站錯邊被丟掉、自動重寫,7 篇進審核頁時全部站對邊 ✅")
 print("\nall passed")

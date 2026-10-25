@@ -79,7 +79,7 @@ from .platforms.base import (
     PostNotFoundError,
 )
 from .platforms.registry import PLATFORMS, get_platform
-from . import image_review, product_assets
+from . import arm_check, image_review, product_assets
 from .product_registry import describe as describe_product, remember as remember_product
 from .publish_failure import PublishFailure, classify as classify_failure
 from .publish_guard import DraftNotPublishable, publish_blockers
@@ -788,7 +788,9 @@ LABEL_KEYS = ("topic_reason", "characteristics", "test_axis", "test_arm",
               # 2026-10-07: where the post sits in the cluster design (clusters.py)
               "cluster_id", "kind", "experiment", "scheduled_for",
               # 2026-10-22: Gemma's read of the image (image_review.py)
-              "image_description", "image_check")
+              "image_description", "image_check",
+              # 2026-10-24: is a cluster draft on its arm's side (arm_check.py)
+              "arm_check")
 
 
 class StaleAnalysis(RuntimeError):
@@ -1376,6 +1378,15 @@ def _run_terminal(product_name: str, channel: str, drafts: list[dict[str, Any]],
     results: list[dict[str, Any]] = []
     for i, draft in enumerate(drafts, start=1):
         print(f"\n########## Draft {i} of {len(drafts)} ##########")
+        if is_scheduled_kind(draft):
+            # Same facts the browser shows above its Approve button.
+            exp = bool(draft.get("experiment"))
+            role = ("EXPERIMENT — must NOT make this week's change" if exp
+                    else "MAIN — makes this week's change")
+            print(f"[cluster {draft['cluster_id']} · {draft.get('scheduled_for')} · {role}]")
+            line = arm_check.describe(exp, draft.get("arm_check"))
+            if line:
+                print(line)
         try:
             decision = step4_human_review(draft, product_name)
             if not decision.approved:
@@ -1675,6 +1686,31 @@ def _opening_hypothesis(product_name: str, channel: str,
     return strategy.hypothesis
 
 
+def _on_the_right_side(drafts: list[dict[str, Any]], is_experiment: bool,
+                       test: str) -> list[dict[str, Any]]:
+    """Keep only drafts on their arm's side of the week's change (arm_check.py).
+    A wrong-side draft is dropped, said out loud, and the slot is drafted
+    again by the caller's retry. One the checker could not read is kept,
+    labelled, for the human to judge."""
+    if not test:
+        return drafts
+    kept = []
+    for d in drafts:
+        check = arm_check.makes_change(d["text"], test)
+        v = arm_check.verdict(is_experiment, check)
+        d["arm_check"] = {"verdict": v, "makes_change": check.get("makes_change"),
+                          "model": check.get("model")}
+        if v == "wrong_side":
+            print(f"[wrong side] {'Experiment' if is_experiment else 'Main'} draft "
+                  f"{'makes' if is_experiment else 'does not make'} this week's change — dropped, "
+                  f"drafting again: {d['text'][:80]}…")
+            audit.log_event("cluster", "arm_check.failed", experiment=is_experiment,
+                             text=d["text"][:200], raw=check.get("raw"))
+            continue
+        kept.append(d)
+    return kept
+
+
 def run_cluster(whitepaper_path: str, channel: str = "bluesky", product_name: str | None = None,
                 terminal: bool = False, no_image: bool = False, today: Any = None) -> int:
     """`contentmaster run --cluster`: the next week's seven posts at once.
@@ -1751,13 +1787,14 @@ def run_cluster(whitepaper_path: str, channel: str = "bluesky", product_name: st
         need = sum(1 for sl in empty if sl["experiment"] == is_exp)
         got: list[dict[str, Any]] = []
         mine = [t for t, sl in zip(offered, empty) if sl["experiment"] == is_exp] or offered
-        for _attempt in range(2):  # one retry for a model that returned too few
+        for _attempt in range(3):  # retries cover too-few drafts and wrong-side ones
             if len(got) >= need:
                 break
-            got += generator.draft_posts(
+            batch = generator.draft_posts(
                 {"name": product_name, "features": []}, channel, n=need - len(got), topics=mine,
                 prior=prior_for, target=topic_index.load_target(product_name),
                 category=topic_index.load_category(product_name), cluster_arm=arm) or []
+            got += _on_the_right_side(batch, is_exp, (h or {}).get("test", ""))
         pools[is_exp] = got[:need]
 
     drafts = []

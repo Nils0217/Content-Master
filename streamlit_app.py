@@ -42,7 +42,7 @@ from contentmaster.pipeline import apply_analysis_decision, step5_publish, step6
 from contentmaster.pipeline import LABEL_KEYS, PublishFailed, StaleAnalysis
 from contentmaster.pipeline import (NotSchedulable, approve_for_schedule, is_scheduled_kind,
                                     record_rejected)
-from contentmaster import clusters
+from contentmaster import arm_check, clusters, image_review
 from contentmaster import hypothesis as hyp, reasoning
 from contentmaster.publish_guard import publish_blockers
 from contentmaster.platforms.registry import get_platform
@@ -244,6 +244,13 @@ with tab_drafts:
             # not to lose the text review with it.
             try:
                 st.image(entry["image_path"], caption="Generated image")
+                # 2026-10-22: Gemma's read, same list the terminal prints.
+                if entry.get("image_description"):
+                    st.caption(f"Image model: {entry['image_description']}")
+                for problem in image_review.problems(
+                        {**(entry.get("image_check") or {}),
+                         "description": entry.get("image_description")} if entry.get("image_check") else None):
+                    st.warning(problem)
             except Exception as e:  # noqa: BLE001 — any decode failure, same answer
                 st.warning(f"The image for this draft could not be opened ({e}). "
                            "Approving will publish the text without it.")
@@ -260,6 +267,10 @@ with tab_drafts:
                     if entry.get("experiment") else "**Main** — makes this week's change")
             st.info(f"Cluster {entry['cluster_id']} · {entry.get('scheduled_for')} · {role}\n\n"
                     f"This week's hypothesis: {h}")
+            # 2026-10-24: same line the terminal prints (arm_check.describe).
+            check_line = arm_check.describe(bool(entry.get("experiment")), entry.get("arm_check"))
+            if check_line:
+                (st.success if "passes" in check_line else st.warning)(check_line)
 
         col_a, col_e, col_f, col_r = st.columns(4)
 
