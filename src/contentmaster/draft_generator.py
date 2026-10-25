@@ -522,6 +522,12 @@ class DraftGenerator:
         # nothing is the honest answer: the run stops and says what is
         # broken, instead of handing a reviewer something to approve that
         # was never about their product.
+        if cluster_arm:
+            # 2026-10-24: inside run --cluster this is one attempt of several;
+            # an [error] here read as the run failing while it went on to
+            # retry. run_cluster reports what is still missing at the end.
+            print("[attempt] No usable draft this attempt — trying again.")
+            return []
         print("[error] No usable draft came back. Either the local LLM did not respond, or "
               "every draft it wrote was dropped (see any [dropped] lines above). Check that "
               "Ollama is up and that --whitepaper points at a readable file.")
@@ -652,7 +658,9 @@ class DraftGenerator:
             f"Reply with exactly {wanted} block(s) in this format, separated by a line of three "
             "dashes. Use these field names exactly:\n\n"
             "POST: the post text itself, nothing else\n"
-            "TOPIC: which of the available topics above it is grounded in, copied exactly\n"
+            "TOPIC: the topic it is grounded in, copied exactly from one of the lines starting "
+            "with '- ' in the topic list above — never a heading of these instructions such as "
+            "GROUNDING or EVIDENCE\n"
             "WHY: one sentence on why you chose that topic for this post\n"
             "IS: comma-separated characteristics of this post\n"
             "TESTING: what this post varies, and which side it is on, as `<what> = <side>` — "

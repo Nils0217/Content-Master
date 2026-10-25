@@ -228,4 +228,20 @@ assert len(rows) == 7 and all(q[r["post_id"]]["arm_check"]["verdict"] == "ok" fo
     [q[r["post_id"]].get("arm_check") for r in rows]
 pipeline._on_the_right_side = orig
 print("15. 整週:experiment 第一批站錯邊被丟掉、自動重寫,7 篇進審核頁時全部站對邊 ✅")
+
+# 2026-10-24 真實實跑:模型把指示裡的段落標題(GROUNDING)當主題名;重試中途印出 [error] 像是壞了
+import io, contextlib
+dg.requests.post = lambda url, json=None, timeout=None: Resp(
+    "POST: Cats like routine.\nTOPIC: GROUNDING\nWHY: w\nIS: x\nTESTING: a = b\nEVIDENCE-USED: none\nEVIDENCE-AGAINST: none")
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    out = dg.DraftGenerator().draft_posts({"name": P, "features": []}, CH, n=1, topics=TOPICS[:2],
+                                          prior={"hypothesis": {"id": "h", "test": "t"}}, cluster_arm="main")
+assert out == [] and "[attempt]" in buf.getvalue() and "[error]" not in buf.getvalue(), buf.getvalue()
+dg.requests.post = post
+prompts.clear()
+dg.DraftGenerator()._llm_draft_posts_for_topics(P, CH, TOPICS[:2], {"hypothesis": {"id": "h", "test": "t"}},
+                                                None, n=1, cluster_arm="main")
+assert "never a heading of these instructions such as GROUNDING" in prompts[-1]
+print("16. 主題只能從清單抄(不能寫 GROUNDING);cluster 重試中的一次失敗是提示,不是 [error] ✅")
 print("\nall passed")
