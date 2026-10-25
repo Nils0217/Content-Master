@@ -195,7 +195,7 @@ def _show_length(channel: str, text: str) -> None:
         st.caption(f"{n} / {cap} characters")
 
 
-tab_drafts, tab_analysis = st.tabs(["Draft review", "Analysis review"])
+tab_drafts, tab_analysis, tab_schedule = st.tabs(["Draft review", "Analysis review", "Schedule"])
 
 with tab_drafts:
     pending = draft_queue.find_pending()
@@ -549,3 +549,58 @@ with tab_analysis:
                 st.session_state[f"show_disagree_{a_key}"] = False
                 st.info("Disagreement recorded.")
                 st.rerun()
+
+
+# 2026-10-25: scheduled publishing (scheduler.py). One time for the whole
+# cluster — the hour is a condition of the experiment. Same function as
+# `contentmaster schedule --time HH:MM`.
+with tab_schedule:
+    from datetime import date as _date
+
+    from contentmaster import posts as _posts, scheduler
+
+    live_clusters = sorted((c for c in clusters.all_clusters().values() if c["cluster_id"] > 0),
+                           key=lambda c: (c["product"], c["cluster_id"]))
+    if not live_clusters:
+        st.info("No cluster yet. Run `contentmaster run --cluster` to draft one.")
+    else:
+        labels = [f"{c['product']} / {c['channel']} — cluster {c['cluster_id']} "
+                  f"(week of {c['week_start']}, {c['status']})" for c in live_clusters]
+        pick = st.selectbox("Cluster", range(len(live_clusters)), index=len(live_clusters) - 1,
+                            format_func=lambda i: labels[i])
+        c = live_clusters[pick]
+        st.caption(f"This week's hypothesis: {(c.get('hypothesis') or {}).get('test', '')}")
+
+        rows = {r["scheduled_for"]: r for r in _posts.in_cluster(c["product"], c["channel"],
+                                                                 c["cluster_id"], kind="cluster")
+                if r["status"] in ("draft", "approved", "scheduled", "published", "failed")}
+        queue = draft_queue._latest_entries()
+        for slot in clusters.slots(c["cluster_id"], _date.fromisoformat(c["week_start"])):
+            r = rows.get(slot["date"])
+            line = clusters.cluster_line({"cluster_id": c["cluster_id"], "scheduled_for": slot["date"],
+                                          "experiment": slot["experiment"]})
+            if not r:
+                st.write(f"⬜ {line} — **no post yet** (run `contentmaster run --cluster`)")
+                continue
+            when = (r.get("scheduled_at") or "")[:16].replace("T", " ")
+            mark = {"draft": "📝 waiting for review", "approved": "✅ approved, not scheduled",
+                    "scheduled": f"🕒 scheduled {when}", "published": "📤 published",
+                    "failed": "⚠ failed"}[r["status"]]
+            text = (queue.get(r["post_id"]) or {}).get("text", "")
+            st.write(f"{mark} · #{r.get('natural_id') or '—'} · {line}")
+            st.caption(text[:140])
+
+        default = c.get("post_time") or "18:00"
+        hhmm = st.selectbox("Time of day (all seven posts)", scheduler.TIME_CHOICES,
+                            index=scheduler.TIME_CHOICES.index(default))
+        if st.button("Schedule post"):
+            result = scheduler.schedule_cluster(c["product"], c["channel"], c["cluster_id"], hhmm)
+            st.success(f"{len(result['scheduled'])} post(s) scheduled at {hhmm}.")
+            if result["not_approved"]:
+                st.info(f"Not approved yet: {', '.join(result['not_approved'])}. They join {hhmm} "
+                        "as soon as you approve them.")
+            if result["past"]:
+                st.warning(f"Already past: {', '.join(result['past'])}. They go out at the next wake "
+                           "and are marked late.")
+            st.caption(f"Mac: {scheduler.sync_agent()}")
+

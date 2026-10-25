@@ -97,6 +97,14 @@ def print_status() -> None:
     for e in drafts:
         print(f"  {e.get('draft_id')} — {(e.get('text') or '')[:70]}")
 
+    from .scheduler import upcoming
+
+    sched = upcoming()
+    print("\n" + ("SCHEDULED TO PUBLISH" if sched else "SCHEDULED TO PUBLISH: none"))
+    for r in sched:
+        print(f"  #{r.get('natural_id')}  {str(r.get('scheduled_at'))[:16].replace('T', ' ')}  "
+              f"cluster {r.get('cluster_id')}  {'experiment' if r.get('experiment') else 'main'}")
+
     live = tracking_review.find_refreshable()
     print(f"\nTRACKED POSTS (live, under 30 days): {len(live)}")
     due = tracking_review.find_due("24h")

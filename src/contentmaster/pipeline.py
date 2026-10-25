@@ -690,6 +690,10 @@ def approve_for_schedule(draft_id: str, final_text: str, image_path: str | None 
         fields["reviewer_note"] = reviewer_note
     draft_queue.update_entry(draft_id, **fields)
     row = posts.approve(draft_id)
+    # Its cluster may already have a posting time — then it joins the
+    # schedule now, without another button press (scheduler.py).
+    from .scheduler import schedule_if_cluster_timed
+    row = schedule_if_cluster_timed(row)
     audit.log_event("posts", "approved_for_schedule", post_id=draft_id,
                      natural_id=row["natural_id"], cluster_id=row["cluster_id"],
                      scheduled_for=row.get("scheduled_for"))

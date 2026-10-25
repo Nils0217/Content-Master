@@ -167,6 +167,42 @@ def _cmd_clusters(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_schedule(args: argparse.Namespace) -> int:
+    """Terminal counterpart of the review page's Schedule tab."""
+    from . import clusters, scheduler
+
+    # No product name typed: the product of the most recently touched
+    # cluster on this channel — never a name written into the code.
+    live = sorted((c for c in clusters.all_clusters().values()
+                   if c["cluster_id"] > 0 and c["channel"] == args.channel
+                   and (not args.product_name or c["product"] == args.product_name)),
+                  key=lambda c: c.get("seq") or 0)
+    if not live:
+        print("No cluster yet — run `contentmaster run --cluster` first.")
+        return 1
+    product = live[-1]["product"]
+    cid = args.cluster if args.cluster is not None else max(
+        c["cluster_id"] for c in live if c["product"] == product)
+    result = scheduler.schedule_cluster(product, args.channel, cid, args.time)
+    print(f"Cluster {cid}: {len(result['scheduled'])} post(s) scheduled at {args.time} "
+          f"({', '.join(result['scheduled']) or 'none'}).")
+    if result["not_approved"]:
+        print(f"  Not approved yet: {', '.join(result['not_approved'])} — they join this time "
+              "when you approve them.")
+    if result["past"]:
+        print(f"  Already past: {', '.join(result['past'])} — published at the next wake, marked late.")
+    print(f"  Mac: {scheduler.sync_agent()}")
+    return 0
+
+
+def _cmd_publish_due(args: argparse.Namespace) -> int:
+    from . import scheduler
+
+    n = scheduler.publish_due()
+    print(f"[publish-due] {n} post(s) published.")
+    return 0
+
+
 def _cmd_refresh(args: argparse.Namespace) -> int:
     return _pipeline.refresh_metrics()
 
@@ -393,6 +429,19 @@ def build_parser() -> argparse.ArgumentParser:
              "and which errors keep repeating",
     )
     p_status.set_defaults(func=_cmd_status)
+
+    p_schedule = sub.add_parser(
+        "schedule", help="Schedule a cluster's approved posts at one time of day (same as the "
+                         "review page's Schedule tab)")
+    p_schedule.add_argument("--time", required=True, help="HH:MM, half-hour steps 06:00–23:30")
+    p_schedule.add_argument("--cluster", type=int, default=None, help="Default: the latest cluster")
+    p_schedule.add_argument("--product-name", default=None)
+    p_schedule.add_argument("--channel", default="bluesky")
+    p_schedule.set_defaults(func=_cmd_schedule)
+
+    p_publish_due = sub.add_parser(
+        "publish-due", help="Publish scheduled posts whose time has come (what the Mac runs)")
+    p_publish_due.set_defaults(func=_cmd_publish_due)
 
     p_clusters = sub.add_parser(
         "clusters", help="List hypothesis clusters and the posts in each (natural id, role, status)")
