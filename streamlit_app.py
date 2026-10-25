@@ -263,10 +263,7 @@ with tab_drafts:
         if scheduled:
             c = clusters.get(entry["product"], entry["channel"], entry["cluster_id"]) or {}
             h = (c.get("hypothesis") or {}).get("test", "")
-            role = ("**Experiment** — deliberately does NOT make this week's change"
-                    if entry.get("experiment") else "**Main** — makes this week's change")
-            st.info(f"Cluster {entry['cluster_id']} · {entry.get('scheduled_for')} · {role}\n\n"
-                    f"This week's hypothesis: {h}")
+            st.info(f"**{clusters.cluster_line(entry)}**\n\nThis week's hypothesis: {h}")
             # 2026-10-24: same line the terminal prints (arm_check.describe).
             check_line = arm_check.describe(bool(entry.get("experiment")), entry.get("arm_check"))
             if check_line:

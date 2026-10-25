@@ -163,3 +163,18 @@ def ensure_cluster_zero(product: str, channel: str) -> dict[str, Any]:
         "result": None,
         "note": "published before the cluster design (2026-10-06); tests nothing",
     })
+
+
+def cluster_line(entry: dict[str, Any]) -> str:
+    """"Cluster 1 · Wed 2026-10-28 · Main — makes this week's change".
+    The one wording for a cluster post's place in the week: browser review,
+    terminal review and the end-of-run list all print this."""
+    day = entry.get("scheduled_for") or ""
+    try:
+        day = f"{date.fromisoformat(day):%a} {day}"
+    except ValueError:
+        pass
+    role = ("Experiment — must NOT make this week's change" if entry.get("experiment")
+            else "Main — makes this week's change")
+    return f"Cluster {entry.get('cluster_id')} · {day} · {role}"
+

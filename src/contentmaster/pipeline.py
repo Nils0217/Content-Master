@@ -1380,10 +1380,9 @@ def _run_terminal(product_name: str, channel: str, drafts: list[dict[str, Any]],
         print(f"\n########## Draft {i} of {len(drafts)} ##########")
         if is_scheduled_kind(draft):
             # Same facts the browser shows above its Approve button.
+            from .clusters import cluster_line
             exp = bool(draft.get("experiment"))
-            role = ("EXPERIMENT — must NOT make this week's change" if exp
-                    else "MAIN — makes this week's change")
-            print(f"[cluster {draft['cluster_id']} · {draft.get('scheduled_for')} · {role}]")
+            print(f"[{cluster_line(draft)}]")
             line = arm_check.describe(exp, draft.get("arm_check"))
             if line:
                 print(line)
@@ -1541,6 +1540,9 @@ def _print_queue_summary(drafts: list[dict[str, Any]]) -> None:
             "template": "NOT generated — fixed template, see the warning above",
         }.get(source, source)
         print(f"\nDraft {i} [{source}] — {label}")
+        if is_scheduled_kind(d):
+            from .clusters import cluster_line
+            print(f"  {cluster_line(d)}")
         if d.get("topic"):
             print(f"  topic: {d['topic']}")
         print(f"  text : {d['text'][:100]}")

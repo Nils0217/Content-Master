@@ -347,6 +347,22 @@ def _hypothesis_instruction(h: dict[str, Any] | None, require_field: bool,
     return out
 
 
+def _post_field(h: dict[str, Any] | None, cluster_arm: str | None) -> str:
+    """The POST line of the reply format, carrying the arm's requirement.
+
+    2026-10-25: a real fill run lost both main-arm attempts to the role check
+    (arm_check.py) — llama wrote posts with no question although the
+    hypothesis section above said every post must ask one. Said again where
+    the post is actually written, it is not left behind three paragraphs up.
+    """
+    test = (h or {}).get("test")
+    if cluster_arm == "main" and test:
+        return f"POST: the post text itself, nothing else. It MUST do this: {test}\n"
+    if cluster_arm == "experiment" and test:
+        return f"POST: the post text itself, nothing else. It must NOT do this: {test}\n"
+    return "POST: the post text itself, nothing else\n"
+
+
 def _target_instruction(target: dict[str, Any] | None) -> str:
     """2026-09-18 (real design review): a target is opt-in and currently
     only a region/audience string (see topic_index.load_target) — set via
@@ -657,7 +673,7 @@ class DraftGenerator:
         prompt += (
             f"Reply with exactly {wanted} block(s) in this format, separated by a line of three "
             "dashes. Use these field names exactly:\n\n"
-            "POST: the post text itself, nothing else\n"
+            + _post_field(hypothesis, cluster_arm) +
             "TOPIC: the topic it is grounded in, copied exactly from one of the lines starting "
             "with '- ' in the topic list above — never a heading of these instructions such as "
             "GROUNDING or EVIDENCE\n"

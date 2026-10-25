@@ -244,4 +244,15 @@ dg.DraftGenerator()._llm_draft_posts_for_topics(P, CH, TOPICS[:2], {"hypothesis"
                                                 None, n=1, cluster_arm="main")
 assert "never a heading of these instructions such as GROUNDING" in prompts[-1]
 print("16. 主題只能從清單抄(不能寫 GROUNDING);cluster 重試中的一次失敗是提示,不是 [error] ✅")
+
+# 2026-10-25:日期顯示,以及「必須 / 不准」寫在 POST 欄位旁邊
+assert clusters.cluster_line({"cluster_id": 1, "scheduled_for": "2026-10-28", "experiment": False}) == \
+    "Cluster 1 · Wed 2026-10-28 · Main — makes this week's change"
+assert clusters.cluster_line({"cluster_id": 1, "scheduled_for": "2026-10-29", "experiment": True}) == \
+    "Cluster 1 · Thu 2026-10-29 · Experiment — must NOT make this week's change"
+assert "It MUST do this: ask" in dg._post_field({"test": "ask"}, "main")
+assert "It must NOT do this: ask" in dg._post_field({"test": "ask"}, "experiment")
+assert dg._post_field(None, None) == "POST: the post text itself, nothing else\n"
+assert "clusters.cluster_line(entry)" in app and "cluster_line(draft)" in term and "cluster_line(d)" in term
+print("17. 審核頁、終端機、結束清單都顯示「Cluster 1 · Wed 2026-10-28 · Main …」;必須 / 不准做的改變寫在 POST 欄位旁 ✅")
 print("\nall passed")
