@@ -57,6 +57,10 @@ def schedule_cluster(product: str, channel: str, cluster_id: int, hhmm: str) -> 
     c = clusters.get(product, channel, cluster_id)
     if not c or cluster_id < 1:
         raise KeyError(f"no cluster {cluster_id} for {product} / {channel}")
+    if c.get("status") == "cancelled":
+        # 2026-10-26: pressing Schedule on a cancelled cluster sent nothing
+        # but flipped its status back to "scheduled", rewriting the record.
+        raise ValueError(f"cluster {cluster_id} was cancelled — it cannot be scheduled")
     out: dict[str, list[str]] = {"scheduled": [], "not_approved": [], "past": []}
     now = datetime.now().astimezone()
     live = [r for r in posts.in_cluster(product, channel, cluster_id, kind="cluster")

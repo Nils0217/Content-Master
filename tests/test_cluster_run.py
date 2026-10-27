@@ -289,7 +289,14 @@ assert clusters.get(P, CH, 2)["status"] == "cancelled"
 assert all(x["cluster_id"] != 2 for x in clusters.running(P, CH, date(2026, 11, 2)))
 again = clusters.create(P, CH, date(2026, 11, 2), {"id": "hyp-new", "test": "t"}, 1)
 assert again["cluster_id"] == 3
-print("20. 取消 cluster:沒發的貼文標成取消(編號保留不重用),那一週可以重新開 ✅")
+try:
+    scheduler.schedule_cluster(P, CH, 2, "18:00"); raise AssertionError("取消的 cluster 被排程了")
+except ValueError:
+    pass
+assert clusters.get(P, CH, 2)["status"] == "cancelled"
+app_src = (Path(__file__).resolve().parent.parent / "streamlit_app.py").read_text()
+assert 'c.get("status") == "cancelled"' in app_src and "cannot be scheduled" in app_src
+print("20. 取消 cluster:沒發的貼文標成取消(編號保留不重用),那一週可以重新開;取消的不能再排程 ✅")
 
 # 2026-10-27 真實實跑:只剩一天要補,只給模型一個主題,它把主題寫成「A domestic cat」,連續 6 次被丟掉
 dg.requests.post = lambda url, json=None, timeout=None: Resp(

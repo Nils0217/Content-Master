@@ -598,6 +598,10 @@ with tab_schedule:
             st.caption(text[:140])
 
         default = c.get("post_time") or "18:00"
+        if c.get("status") == "cancelled":
+            st.info(f"This cluster was cancelled ({c.get('cancel_reason', 'no reason recorded')}). "
+                    "It is kept for the record and cannot be scheduled.")
+            st.stop()
         hhmm = st.selectbox("Time of day (all seven posts)", scheduler.TIME_CHOICES,
                             index=scheduler.TIME_CHOICES.index(default))
         if st.button("Schedule post"):
