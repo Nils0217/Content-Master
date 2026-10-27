@@ -1666,10 +1666,6 @@ def launch_streamlit() -> None:
 
 # --- clusters (2026-10-07, see clusters.py) -----------------------------------
 
-# A slot is filled while its post is still on its way out or already out.
-_LIVE_STATUSES = ("draft", "approved", "scheduled", "published")
-
-
 def _opening_hypothesis(product_name: str, channel: str,
                         topics: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The first hypothesis, when no analysis has chosen one yet. Same
@@ -1736,7 +1732,12 @@ def run_cluster(whitepaper_path: str, channel: str = "bluesky", product_name: st
     whitepaper_path = whitepaper_path.strip()
     product_name = _resolve_product_name(product_name, whitepaper_path)
     posts.backfill_from_tracking()
-    week = clusters.week_start_after(today or date.today())
+    today = today or date.today()
+    to_fill, new_week, why = clusters.target(product_name, channel, today)
+    if to_fill is None and new_week is None:
+        print(f"[cluster] Nothing to draft: {why}")
+        return 0
+    week = date.fromisoformat(to_fill["week_start"]) if to_fill else new_week
 
     try:
         topics_all = step1_cognee_extract_topics(whitepaper_path, product_name=product_name)
@@ -1748,15 +1749,9 @@ def run_cluster(whitepaper_path: str, channel: str = "bluesky", product_name: st
               "posts. Run `contentmaster run` once to extract topics, then try again.")
         return 1
 
-    existing = [c for c in clusters.for_product(product_name, channel)
-                if c["cluster_id"] > 0 and c.get("week_start") == week.isoformat()]
     prior = find_best_prior(product_name, channel) or {}
-    if existing:
-        cluster = existing[0]
-        if cluster["status"] != "drafting":
-            print(f"[cluster {cluster['cluster_id']}] The week of {week} is already {cluster['status']} "
-                  "— nothing to fill.")
-            return 0
+    if to_fill:
+        cluster = to_fill
         h = cluster.get("hypothesis")
         print(f"[cluster {cluster['cluster_id']}] Filling empty days in the week of {week}.")
     else:
@@ -1777,9 +1772,7 @@ def run_cluster(whitepaper_path: str, channel: str = "bluesky", product_name: st
         cluster = clusters.create(product_name, channel, week, h, learned_from)
 
     cid = cluster["cluster_id"]
-    filled = {r.get("scheduled_for") for r in posts.in_cluster(product_name, channel, cid, kind="cluster")
-              if r["status"] in _LIVE_STATUSES}
-    empty = [sl for sl in clusters.slots(cid, week) if sl["date"] not in filled]
+    empty = clusters.open_slots(cluster, today)
     if not empty:
         print(f"[cluster {cid}] All seven days already have a post.")
         return 0

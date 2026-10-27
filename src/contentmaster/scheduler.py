@@ -77,6 +77,32 @@ def schedule_cluster(product: str, channel: str, cluster_id: int, hhmm: str) -> 
     return out
 
 
+def needs_scheduling(c: dict[str, Any]) -> list[dict[str, Any]]:
+    """Approved posts in this cluster that have no time yet."""
+    return [r for r in posts.in_cluster(c["product"], c["channel"], c["cluster_id"], kind="cluster")
+            if r["status"] == "approved"]
+
+
+def default_cluster(candidates: list[dict[str, Any]], today: date | None = None) -> int:
+    """Index of the cluster the Schedule tab and `contentmaster schedule`
+    should start on: the earliest running cluster with approved posts
+    waiting for a time, else the earliest running one, else the newest.
+
+    2026-10-26: both defaulted to the newest cluster, so "Schedule post"
+    scheduled a cluster that should not have existed yet while the current
+    week's five approved posts never got a time — Monday's post missed 18:00.
+    """
+    today = today or date.today()
+    run = [i for i, c in enumerate(candidates)
+           if c.get("status") != "cancelled" and c.get("week_start")
+           and date.fromisoformat(c["week_start"]).toordinal() + 7 > today.toordinal()]
+    run.sort(key=lambda i: candidates[i]["week_start"])
+    for i in run:
+        if needs_scheduling(candidates[i]):
+            return i
+    return run[0] if run else len(candidates) - 1
+
+
 def schedule_if_cluster_timed(row: dict[str, Any]) -> dict[str, Any]:
     """Called at approval: a post approved after its cluster was given a time
     joins the schedule at that time without another button press."""

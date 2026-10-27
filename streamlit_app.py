@@ -566,9 +566,16 @@ with tab_schedule:
     else:
         labels = [f"{c['product']} / {c['channel']} — cluster {c['cluster_id']} "
                   f"(week of {c['week_start']}, {c['status']})" for c in live_clusters]
-        pick = st.selectbox("Cluster", range(len(live_clusters)), index=len(live_clusters) - 1,
+        pick = st.selectbox("Cluster", range(len(live_clusters)),
+                            index=scheduler.default_cluster(live_clusters),
                             format_func=lambda i: labels[i])
         c = live_clusters[pick]
+        # 2026-10-26: say so when another running cluster still has approved
+        # posts with no time — that is how Monday's post was missed.
+        for j, other in enumerate(live_clusters):
+            if j != pick and other.get("status") != "cancelled" and scheduler.needs_scheduling(other):
+                st.warning(f"{labels[j]} has {len(scheduler.needs_scheduling(other))} approved "
+                           "post(s) with no time yet.")
         st.caption(f"This week's hypothesis: {(c.get('hypothesis') or {}).get('test', '')}")
 
         rows = {r["scheduled_for"]: r for r in _posts.in_cluster(c["product"], c["channel"],

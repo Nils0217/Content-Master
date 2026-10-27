@@ -180,9 +180,12 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     if not live:
         print("No cluster yet — run `contentmaster run --cluster` first.")
         return 1
-    product = live[-1]["product"]
-    cid = args.cluster if args.cluster is not None else max(
-        c["cluster_id"] for c in live if c["product"] == product)
+    if args.cluster is not None:
+        product = live[-1]["product"]
+        cid = args.cluster
+    else:
+        chosen = live[scheduler.default_cluster(live)]
+        product, cid = chosen["product"], chosen["cluster_id"]
     result = scheduler.schedule_cluster(product, args.channel, cid, args.time)
     print(f"Cluster {cid}: {len(result['scheduled'])} post(s) scheduled at {args.time} "
           f"({', '.join(result['scheduled']) or 'none'}).")

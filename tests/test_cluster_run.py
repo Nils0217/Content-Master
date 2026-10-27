@@ -99,17 +99,22 @@ assert len(mon_now) == 2 and sum(r["status"] == "draft" for r in mon_now) == 1
 assert len(prompts) == 1 and "Do NOT make that change" in prompts[0] and "You are writing 1" in prompts[0]
 print("5. 退件後再跑一次:只補空出來的週一,而且照它的角色(experiment)寫,不重開 cluster ✅")
 
+# 2026-10-26 真實 bug:cluster 1 還在跑的那週又跑 --cluster,結果提早開了 cluster 2
+assert pipeline.run_cluster("doc.rtfd", CH, no_image=True, today=date(2026, 10, 14)) == 0
+assert clusters.get(P, CH, 2) is None, "cluster 1 還沒結束,不該開下一個"
+print("5b. 本週 cluster 還在跑而且已經排滿:不開下一個(下一個要等這週的結果決定)✅")
+
 short["n"] = 2
 prompts.clear()
-assert pipeline.run_cluster("doc.rtfd", CH, no_image=True, today=date(2026, 10, 14)) == 0
+assert pipeline.run_cluster("doc.rtfd", CH, no_image=True, today=date(2026, 10, 19)) == 0   # 週一
 c2 = clusters.get(P, CH, 2)
 assert c2["week_start"] == "2026-10-19" and c2["experiment_weekdays"] == ["Tue", "Fri"]
 assert len(posts.in_cluster(P, CH, 2)) == 7, "模型少給 2 篇時應該重試補齊"
-print("6. 第二個 cluster:experiment 輪到週二、週五;模型少給時自動重試一次補齊 ✅")
+print("6. 上一個結束後的週一跑:當天開第二個 cluster;experiment 輪到週二、週五;模型少給時自動重試補齊 ✅")
 
 for r in posts.in_cluster(P, CH, 2):
     posts.update(r["post_id"], status="published")
-assert pipeline.run_cluster("doc.rtfd", CH, no_image=True, today=date(2026, 10, 14)) == 0
+assert pipeline.run_cluster("doc.rtfd", CH, no_image=True, today=date(2026, 10, 21)) == 0
 assert len(posts.in_cluster(P, CH, 2)) == 7
 print("7. 七天都有貼文時再跑:什麼都不多做 ✅")
 
@@ -127,7 +132,7 @@ modiqo_play.capture_failure(P, CH, "t", "x", analysis={"human_confirmed": False}
     trace={"post_id": tue, "next_hypothesis": {"id": "hyp-disagreed-2", "test": "y", "watch": "likes"}})
 assert modiqo_play.find_best_prior(P, CH)["hypothesis"]["id"] == "hyp-from-analysis"
 print("7b. 按 disagree 的 hypothesis 不會被下一個 cluster 用;用的是最近一個按 confirm 的 ✅")
-assert pipeline.run_cluster("doc.rtfd", CH, no_image=True, today=date(2026, 10, 21)) == 0
+assert pipeline.run_cluster("doc.rtfd", CH, no_image=True, today=date(2026, 10, 26)) == 0
 c3 = clusters.get(P, CH, 3)
 assert c3["hypothesis_id"] == "hyp-from-analysis" and c3["learned_from"] == 1
 print("8. 有已決定的分析時,下一個 cluster 直接用它的 hypothesis,並記 learned_from = 1 ✅")
@@ -255,4 +260,34 @@ assert "It must NOT do this: ask" in dg._post_field({"test": "ask"}, "experiment
 assert dg._post_field(None, None) == "POST: the post text itself, nothing else\n"
 assert "clusters.cluster_line(entry)" in app and "cluster_line(draft)" in term and "cluster_line(d)" in term
 print("17. 審核頁、終端機、結束清單都顯示「Cluster 1 · Wed 2026-10-28 · Main …」;必須 / 不准做的改變寫在 POST 欄位旁 ✅")
+
+# --- 2026-10-26 真實情況重現:cluster 自己的週一,週末還空著 ---
+from contentmaster import scheduler
+shutil.rmtree(R / "plays", ignore_errors=True)
+real = clusters.create(P, CH, date(2026, 10, 26), {"id": "hyp-q", "test": "ask a question"}, 0)
+for sl in clusters.slots(1, date(2026, 10, 26))[:5]:
+    pid = posts.new_post_id()
+    posts.register(pid, P, CH, cluster_id=1, kind="cluster", experiment=sl["experiment"], scheduled_for=sl["date"])
+    posts.approve(pid)
+c, new_week, why = clusters.target(P, CH, date(2026, 10, 26))
+assert c and c["cluster_id"] == 1 and new_week is None, why
+assert [sl["date"] for sl in clusters.open_slots(c, date(2026, 10, 26))] == ["2026-10-31", "2026-11-01"]
+assert [sl["date"] for sl in clusters.open_slots(c, date(2026, 11, 1))] == ["2026-11-01"]   # 過去的日子不補
+print("18. 在 cluster 自己的週一跑 --cluster:補這週的週六日,不會開下週的 cluster ✅")
+
+later = clusters.create(P, CH, date(2026, 11, 2), {"id": "hyp-q", "test": "ask a question"}, 0)
+pid = posts.new_post_id()
+posts.register(pid, P, CH, cluster_id=2, kind="cluster", experiment=False, scheduled_for="2026-11-02")
+posts.approve(pid)
+cs = sorted((x for x in clusters.all_clusters().values() if x["cluster_id"] > 0), key=lambda x: x["cluster_id"])
+assert cs[scheduler.default_cluster(cs, date(2026, 10, 26))]["cluster_id"] == 1
+print("19. Schedule 分頁預設選這週、還有沒排時間的那個 cluster,不是最新的 ✅")
+
+gone = clusters.cancel(P, CH, 2, "opened a week early by a bug")
+assert gone == [pid] and posts.get(pid)["status"] == "cancelled" and posts.get(pid)["natural_id"]
+assert clusters.get(P, CH, 2)["status"] == "cancelled"
+assert all(x["cluster_id"] != 2 for x in clusters.running(P, CH, date(2026, 11, 2)))
+again = clusters.create(P, CH, date(2026, 11, 2), {"id": "hyp-new", "test": "t"}, 1)
+assert again["cluster_id"] == 3
+print("20. 取消 cluster:沒發的貼文標成取消(編號保留不重用),那一週可以重新開 ✅")
 print("\nall passed")

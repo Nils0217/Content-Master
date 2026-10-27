@@ -131,7 +131,8 @@ def create(product: str, channel: str, week_start: date, hypothesis: dict[str, A
     if week_start.weekday() != 0:
         raise ValueError(f"a cluster starts on a Monday, not {week_start:%a %Y-%m-%d}")
     existing = for_product(product, channel)
-    if any(str(c["week_start"]) == week_start.isoformat() for c in existing if c["cluster_id"] > 0):
+    if any(str(c["week_start"]) == week_start.isoformat() for c in existing
+           if c["cluster_id"] > 0 and c.get("status") != "cancelled"):
         raise ValueError(f"a cluster already covers the week of {week_start}")
     cluster_id = max((c["cluster_id"] for c in existing), default=0) + 1
     return _append({
@@ -177,4 +178,70 @@ def cluster_line(entry: dict[str, Any]) -> str:
     role = ("Experiment — must NOT make this week's change" if entry.get("experiment")
             else "Main — makes this week's change")
     return f"Cluster {entry.get('cluster_id')} · {day} · {role}"
+
+
+# Statuses that occupy a day: a post on its way out, or out.
+LIVE = ("draft", "approved", "scheduled", "published")
+
+
+def open_slots(c: dict[str, Any], today: date) -> list[dict[str, Any]]:
+    """Days of this cluster from today on that have no live post. Past days
+    are not refilled — a post cannot go out yesterday."""
+    from . import posts
+
+    filled = {r.get("scheduled_for") for r in posts.in_cluster(c["product"], c["channel"],
+                                                              c["cluster_id"], kind="cluster")
+              if r["status"] in LIVE}
+    return [sl for sl in slots(c["cluster_id"], date.fromisoformat(c["week_start"]))
+            if sl["date"] >= today.isoformat() and sl["date"] not in filled]
+
+
+def running(product: str, channel: str, today: date) -> list[dict[str, Any]]:
+    """Clusters whose week has not ended (this week's and any later one),
+    earliest first. Cancelled ones are not running."""
+    return [c for c in for_product(product, channel)
+            if c["cluster_id"] > 0 and c.get("week_start") and c.get("status") != "cancelled"
+            and date.fromisoformat(c["week_start"]) + timedelta(days=7) > today]
+
+
+def target(product: str, channel: str, today: date) -> tuple[dict[str, Any] | None, date | None, str]:
+    """What `run --cluster` should do today: (cluster to fill, None, why) or
+    (None, Monday to open a new one on, why) or (None, None, why not).
+
+    2026-10-26: this was "always open next Monday's cluster". Run on cluster
+    1's own Monday, that opened cluster 2 a week early — cluster 1's empty
+    weekend never filled, and cluster 2 took a hypothesis its predecessor's
+    results had not chosen yet. Now: the earliest running cluster with an
+    open day is filled first; a new one opens only when none is running —
+    today if today is a Monday, otherwise next Monday.
+    """
+    live = running(product, channel, today)
+    for c in live:
+        if open_slots(c, today):
+            return c, None, f"cluster {c['cluster_id']} (week of {c['week_start']}) has open days"
+    if live:
+        last = live[-1]
+        ends = date.fromisoformat(last["week_start"]) + timedelta(days=7)
+        return None, None, (f"cluster {last['cluster_id']} (week of {last['week_start']}) is full and still "
+                            f"running. The next cluster opens on {ends} — its hypothesis comes from this "
+                            "week's results.")
+    week = today if today.weekday() == 0 else week_start_after(today)
+    return None, week, f"no cluster is running — opening the week of {week}"
+
+
+def cancel(product: str, channel: str, cluster_id: int, reason: str) -> list[str]:
+    """Withdraw a cluster that should not run: its unpublished posts become
+    `cancelled` (natural_ids are kept — numbers are never reused), and the
+    week is free again. Published posts are left as they are."""
+    from . import draft_queue, posts
+
+    done = []
+    for r in posts.in_cluster(product, channel, cluster_id):
+        if r["status"] in ("draft", "approved", "scheduled"):
+            posts.update(r["post_id"], status="cancelled")
+            if r["post_id"] in draft_queue._latest_entries():
+                draft_queue.update_entry(r["post_id"], status="cancelled")
+            done.append(r["post_id"])
+    update(product, channel, cluster_id, status="cancelled", cancel_reason=reason)
+    return done
 

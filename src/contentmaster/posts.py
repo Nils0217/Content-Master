@@ -37,7 +37,8 @@ from .config import settings
 
 POSTS_PATH = settings.data_root / "plays" / "_posts.jsonl"
 
-STATUSES = ("draft", "approved", "scheduled", "published", "rejected", "failed", "deleted")
+STATUSES = ("draft", "approved", "scheduled", "published", "rejected", "failed", "deleted",
+            "cancelled")
 
 
 _last_seq = 0
