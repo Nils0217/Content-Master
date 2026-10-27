@@ -709,6 +709,14 @@ class DraftGenerator:
             if not text:
                 continue
             topic = _match_topic(block.get("TOPIC", ""), topics)
+            if topic is None and len(topics) == 1:
+                # 2026-10-27: one topic offered means the post can only be
+                # grounded in it, so its TOPIC line is redundant. Filling a
+                # single cluster day offered "1. Introduction" (whose text
+                # opens "A cat is a domesticated mammal…") and llama named it
+                # "A domestic cat" six attempts running; every draft was
+                # dropped and the day stayed empty.
+                topic = topics[0]
             if topic is None:
                 # Dropped rather than guessed: a draft filed under a topic
                 # that does not exist would corrupt the usage counts that

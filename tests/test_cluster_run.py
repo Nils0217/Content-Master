@@ -290,4 +290,17 @@ assert all(x["cluster_id"] != 2 for x in clusters.running(P, CH, date(2026, 11, 
 again = clusters.create(P, CH, date(2026, 11, 2), {"id": "hyp-new", "test": "t"}, 1)
 assert again["cluster_id"] == 3
 print("20. 取消 cluster:沒發的貼文標成取消(編號保留不重用),那一週可以重新開 ✅")
+
+# 2026-10-27 真實實跑:只剩一天要補,只給模型一個主題,它把主題寫成「A domestic cat」,連續 6 次被丟掉
+dg.requests.post = lambda url, json=None, timeout=None: Resp(
+    "POST: Cats are curious companions. What surprised you most?\nTOPIC: A domestic cat\nWHY: w\nIS: x\n"
+    "TESTING: a = b\nEVIDENCE-USED: none\nEVIDENCE-AGAINST: none")
+one = dg.DraftGenerator()._llm_draft_posts_for_topics(P, CH, [{"topic": "1. Introduction", "brief": "A cat is…"}],
+                                                      {"hypothesis": {"id": "h", "test": "t"}}, None, n=1, cluster_arm="main")
+assert one and one[0]["topic"] == "1. Introduction"
+two = dg.DraftGenerator()._llm_draft_posts_for_topics(P, CH, TOPICS[:2], {"hypothesis": {"id": "h", "test": "t"}},
+                                                      None, n=1, cluster_arm="main")
+assert not two, "給兩個以上主題時,對不上還是要丟"
+dg.requests.post = post
+print("21. 只給一個主題時,模型寫錯主題名也照用那個主題;給多個時對不上照樣丟 ✅")
 print("\nall passed")
