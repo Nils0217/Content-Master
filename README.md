@@ -104,6 +104,38 @@ to go decide it, so the same post/checkpoint can't get double-captured.
 
 Every event is written to `audit/events.jsonl` (one JSON line per step).
 
+## Weekly hypothesis clusters and scheduled publishing (2026-10)
+
+The main loop now runs in **clusters**: one calendar week (Mon–Sun), one
+hypothesis, seven posts — five make the week's change, two (the experiment
+days, rotating by cluster number) deliberately do not. Every post is
+approved by a human; a human then picks one time of day and schedules the
+week. See `docs/HANDOFF.md` for the full design and its reasons.
+
+```bash
+contentmaster run --cluster          # fill the running week's empty days, or open the next week
+contentmaster schedule --time 18:00  # same as the review page's Schedule tab
+contentmaster publish-due            # what the Mac runs at posting time (launchd)
+contentmaster clusters               # every cluster and its posts
+contentmaster status                 # what waits on you; scheduled and overdue posts
+```
+
+- Approving a cluster post does **not** publish it; the publish guard runs
+  at approval because nobody is watching when the scheduled post goes out.
+- The Mac wakes only at the posting time (`com.contentmaster.publish`,
+  through `scripts/publish_due.sh`, which raises a notification if the
+  Python environment is broken). A missed time is published on wake and
+  recorded as late.
+- Every hypothesis is read on **follower stickiness** (share of a post's
+  engagers who engaged before) and **follower change** over the week.
+- Gemma (`gemma3:4b`) looks at every image and checks each cluster draft is
+  on its arm's side; the text models write and reason.
+- Google Trends is off by default (`TRENDS_ENABLED=0`): the seed is stale.
+
+Tables, one row each: `plays/_posts.jsonl` (post), `plays/_clusters.jsonl`
+(cluster), `plays/_reasoning.jsonl` (analysis run), `plays/_account.jsonl`
+(follower snapshot); DuckDB `stg_posts`, `stg_clusters`, `stg_reasoning`.
+
 ## Modules added 2026-09-20/22
 
 | module | what it is for |

@@ -1815,3 +1815,30 @@ differently in the browser.
 See `docs/SCHEDULE.md` Phase 10 for what is built and what is still open,
 and Phase 11 for what was deliberately scheduled rather than built.
 
+
+## 2026-09-30 → 2026-10-26 — hypothesis clusters, scheduled publishing, model routing
+
+Full detail and reasons: `docs/HANDOFF.md` (§4 decisions, §5 log).
+
+- **Hypotheses became tests, then week-long tests.** With no baseline the
+  advisors propose TEST/WHY; a judge picks A or B and never rewrites; every
+  model call is kept in `plays/_reasoning.jsonl`. From 10/06 one hypothesis
+  holds for a calendar week of seven posts — five make the change, two
+  (experiment, rotating weekdays by cluster number) deliberately do not. Only
+  a hypothesis the human confirmed carries into the next cluster.
+- **What a test is read on is fixed, not chosen:** follower stickiness (share
+  of a post's engagers who engaged before) and follower change over the
+  week — "there is no wrong, only conditions that did not suit".
+- **Models routed by job.** Gemma reads the images (describe, match, text,
+  invented device) and checks each cluster draft is on its arm's side;
+  llama writes; advisors are llama + gemma (mistral dropped 10/23), the
+  judge qwen3. Stale Google Trends switched off.
+- **Scheduled publishing** — the "auto-publish button" the user's rule
+  allowed: every post approved by a human, then one time chosen for the week;
+  the Mac wakes only at that time (launchd) and reports a broken environment.
+- **Incidents** (see `docs/ERROR_LOG.md`): the venv's Homebrew Python vanished;
+  `run --cluster` opened a cluster a week early and Monday's post missed its
+  time; tests popped browser tabs. Each fixed at the cause.
+- The cat whitepaper is kept as the subject on purpose: it is a fixture for
+  checking that the logic and the pipeline are right, not a campaign.
+

@@ -939,10 +939,34 @@ Decided 2026-09-22 (/grill-me), deliberately left for later.
       costs nothing yet.
 - [ ] **Error index for humans.** The counter is built for the pipeline;
       a view aimed at whoever is debugging is a separate shape.
-- [ ] **Automatic Google Trends refresh.** The seeds are hand-exported CSV
+- [x] ~~**Automatic Google Trends refresh.**~~ Superseded 2026-10-21: trends
+      are switched off (`TRENDS_ENABLED=0`) because the stale seed kept
+      steering hypotheses. Revisit only with a live source. Original note:
+      The seeds are hand-exported CSV
       (`warehouse/seeds/`), currently ending 2026-09-13. Generation states
       the capture date in the prompt so the model can judge staleness for
       itself, which is honest but not a substitute for fresh data.
+
+## Phase 12 — weekly hypothesis clusters (2026-10-06 →)
+
+Designed with the user; reasons in `docs/HANDOFF.md` §4.
+
+- [x] Stage 1 — data: one row per post (`natural_id`, UUID `post_id`,
+      `cluster_id`, `kind`, `experiment`), clusters, cluster 0 backfill.
+- [x] Stage 2 — `run --cluster`: seven posts, five main / two experiment,
+      fill-only reruns, role check (Gemma), fill the running cluster first.
+- [x] Stage 3 — scheduled publishing: one time per cluster, launchd wakes
+      only then, late/failed handling, cancel a cluster.
+- [ ] **Stage 4 — analysis per cluster** (needed before 2026-11-02):
+      24h acts only on a significant change (≥10 engagements and ≥3× the
+      cluster median); 7d chooses the next cluster's hypothesis; 30d
+      concludes the cluster (main vs experiment stickiness, week follower
+      change, ≥10 engagements, extras flagged).
+- [ ] Prompts moved to `prompts/` (byte-identical, checked by snapshot).
+- [ ] Every model call recorded in `plays/_model_calls.jsonl`; `cluster_id`
+      on every table so all of them join.
+- [ ] Withdraw a single already-scheduled post (offered, not built).
+- [ ] Catch title-only drafts (`publish_guard` does not).
 
 ## Notes — considered, not accepted (revisit only with new info)
 

@@ -1,254 +1,262 @@
 # 交接 — ContentMaster
 
-寫於 2026-10-15(取代 9/30 和 10/05 的版本)。**貼這份給下一個模型當開場 prompt。**
+寫於 2026-10-26 21:30(取代 9/30、10/05、10/15 的版本)。**貼這份給下一個模型當開場 prompt。**
 
-開場先做三件事:
-1. 讀完這份。
-2. `./scripts/run_tests.sh` —— 應該 **18 個套件全過**。
-3. `./.venv/bin/contentmaster status` 和 `./.venv/bin/contentmaster clusters` 看什麼在等人。
+開場先做:
+1. 讀完這份,尤其 §0「明天的待辦」和 §8「使用者的要求」。
+2. `./scripts/run_tests.sh` —— 應該 **20 個套件全過**。
+3. `./.venv/bin/contentmaster status` 和 `./.venv/bin/contentmaster clusters`。
+4. **全部用繁體中文回覆**,包括做事中途的進度說明。
 
-然後看 §6「下一步」,**標著「等使用者」的不要自己開始**。
+---
+
+## 0. 明天(2026-10-27,週二)的待辦
+
+**明天是 cluster 1 的第 2 天。Mac 第一次要在 18:00 自己發文(#12)。**
+
+### 使用者
+| 時間 | 做什麼 |
+|---|---|
+| 18:00 前 | **Mac 開著、螢幕不要蓋上**(蓋上 = 睡著,要等打開才會補發、標成晚發) |
+| 任何時候 | 週六(10/31)有 1 篇待審:「Meet our **Furry** Roommate…」名字寫錯 → **Reject**,再跑 `contentmaster run --cluster` 補,然後 Approve(核准後自動排到 18:00) |
+| 18:00 之後 | `contentmaster status` —— 確認 #12 從「排程中」變成已發佈;沒有就看 `logs/publish.log` 最後幾行,貼給 Claude |
+| 21:00 之後 | `contentmaster review` —— #11 的 24h 檢查(#11 是 10/26 20:57 發的,滿 24 小時才開放) |
+
+### Claude Code
+1. **確認第一次自動發文**:使用者貼回 `status` / `logs/publish.log` 時,檢查 #12 有沒有發、晚多少、`environment` 有沒有記。
+   launchd 的實際執行從沒在真實時間點驗證過(安裝有驗證,`runs = 0`)。
+2. **續做被打斷的工作(使用者已同意,10/25):**
+   - **把所有模型指示搬到 `prompts/`**,一個用途一個檔,程式只決定用哪段、填哪些變數。
+     **做法:先存快照、搬完逐字比對。** 快照腳本原本在 scratchpad(已不存在),要重寫:
+     對固定輸入呼叫每個指示產生器,並用假的 `requests.post` 抓住送出去的完整文字,存成 JSON;搬完再跑一次,必須逐字相同。
+     指示所在位置見 §3「指示在哪裡」。
+   - **記錄每一次模型呼叫**:新表 `plays/_model_calls.jsonl`,一次呼叫一列:用途、模型、完整指示、
+     原始回覆、用到的指示檔(含版本雜湊)、`cluster_id`、`post_id`。草稿記下是哪一次呼叫寫的(`call_id`)。
+     建議用 contextvar 的 scope(`with model_calls.scope(cluster_id=1, arm="main"):`)讓呼叫自動帶上 cluster。
+   - **所有表都要能用 `cluster_id` join**(使用者要求):`_reasoning.jsonl`、`_history.jsonl`、`_account.jsonl`
+     目前沒有 `cluster_id`,要補;`stg_*` 也要補欄位。
+3. **cluster 第 4 段:分析(使用者已同意,11/02 之前一定要好)**
+   - 24h:只在明顯變化時才改還沒發的貼文(某篇 ≥10 互動 **且** ≥ cluster 中位數 3 倍),否則只記數字、不叫模型。
+   - 7d:決定下一個 cluster 的 hypothesis。**11/02(一)cluster 1 結束,當天 `run --cluster` 會開 cluster 2**,
+     用「最近一個人按 Confirm 的 hypothesis」。所以 11/02 之前,cluster 1 的 7d 分析流程要能產生下一個 hypothesis。
+   - 30d:cluster 結論 —— 5 篇主要 vs 2 篇 experiment 比黏著度;一週追蹤變化;門檻一個 cluster ≥10 互動;
+     額外貼文(kind=extra)互動大或那週追蹤者暴增 → 結論標「可能受影響」。
+   - **追蹤變化量只算到 cluster 層級,不拆給單篇**(使用者:追蹤者不是穩定的趨勢線)。
 
 ---
 
 ## 1. 這是什麼
 
 `/Users/liunils/Desktop/Marketing hack` — 本機優先的行銷內容 pipeline。
-從一份來源文件抽主題 → 產草稿 → 人審核 → 發到 Bluesky → 追成效 → 用成效決定下一輪。
+來源文件抽主題 → 產草稿 → 人審 → 排程發到 Bluesky → 追成效 → 用成效決定下一輪。
 
-**核心主張**:產生內容已經免費了,難的是「知道它有沒有用」。整個系統的重點是
-**拒絕宣稱它證明不了的事** —— 資料不夠就說「hypothesis」,不包裝成結論。
+**核心主張**:產生內容免費,難的是「知道它有沒有用」。系統**拒絕宣稱它證明不了的事**。
 
-產品是 **Fluffy roommate**(一隻貓 —— category `A domestic cat`),來源文件
-`Demo-white paper/cat.rtfd`(一份「如何使用一隻貓」的幽默白皮書,41 個主題)。
-帳號 Bluesky,**目前 0 個追蹤者**(following 1、posts 15)。
+**使用者說明(2026-10-21):** 現在持續用這個貓的主題,只是為了驗證**整個邏輯和 pipeline 正確、沒有 bug**。
+優先順序是「pipeline 對不對」,不是「文案好不好」。
 
-### 機器與模型
+產品 **Fluffy roommate**(就是那隻貓,category `A domestic cat`),來源 `Demo-white paper/cat.rtfd`(41 個主題)。
+Bluesky 帳號 **0 個追蹤者**。
 
-8GB RAM 的 Apple M3。Ollama 0.35。Cloudflare Workers AI 生圖。
+### 機器與模型(8GB RAM、Apple M3、Ollama 0.35)
 
 ```
-顧問 A（提 hypothesis）   llama3.2:3b      DISCUSS_MODEL_A
-顧問 B（另提一個）        gemma3:4b        DISCUSS_MODEL_B   ← 10/23 換掉 mistral
-裁判（只選 A 或 B）       qwen3:4b         DISCUSS_JUDGE_MODEL
-寫草稿/主題/影片腳本       llama3.2:3b      LLM_IMPROVE_MODEL
-寫圖片 prompt            gemma3:4b        IMAGE_PROMPT_MODEL
-生圖                     FLUX.1-schnell   Cloudflare Workers AI（非本機）
+顧問 A（提 hypothesis）       llama3.2:3b    DISCUSS_MODEL_A
+顧問 B（另提一個）            gemma3:4b      DISCUSS_MODEL_B      ← 10/23 換掉 mistral
+裁判（只選 A 或 B）           qwen3:4b       DISCUSS_JUDGE_MODEL
+寫草稿/縮短/修改               llama3.2:3b    LLM_IMPROVE_MODEL
+寫生圖指令                     gemma3:4b      IMAGE_PROMPT_MODEL
+看圖檢查(相符/有字/捏造)      gemma3:4b      IMAGE_REVIEW_MODEL   ← 10/22 新
+角色檢查(有沒有做這週的改變)  gemma3:4b      ARM_CHECK_MODEL      ← 10/24 新
+生圖                           FLUX.1-schnell Cloudflare Workers AI
 ```
+三個分析模型必須是三個不同家族(llama / gemma / qwen)。
 
-已下載、**還沒實測、還沒採用**:`granite4.2:8b`(5.3GB)、`gemma4:e2b`(4.6GB)、`qwen3.5:4b`(3.3GB)。
-見 §6 第 1 項。8GB 機器塞得下的上限約 5.5GB;`qwen3.5:9b`、`gemma4:e4b`、`gemma4:12b` 都太大。
+已下載、未採用:`gemma4:e2b`、`qwen3.5:4b`(實測等使用者通知;**跑實測會佔 Ollama 15–20 分鐘,要先問**)。
+淘汰、不要換回:`phi4-mini-reasoning`(7844 字思考)、`mistral` 當顧問(9 次都提「問題排解系列」、0/9 被選)、
+`qwen3:4b` 當顧問(120–170 秒、1/3 讀不出)、`qwen3:4b` 關思考(反而寫上萬字)、`qwen2.5:3b`(把貓當產品)、
+`granite4.2:8b`(8GB 跑不動,9/9 逾時,已刪除)。
 
-**淘汰過、不要再換回來的**:
-- `phi4-mini-reasoning` 當裁判 —— 吐 7844 字 `<think>` 獨白(`discuss.py` 有記錄)。
-- `qwen3:4b` 當顧問 —— 每次 120–170 秒,1/3 吐 3000+ 字讀不出答案。
-- `qwen3:4b` 關思考模式（`think: false`）—— 反而把上萬字思考寫進答案。開著思考才乾淨,但一次約 2.5 分鐘。
-- `qwen2.5:3b` 當顧問 —— 把貓當成產品寫「功能與好處」。
+### Python 環境
+`.venv` 連到 **Homebrew 的 python@3.14**。10/24 晚上它被移除(原因不明),所有指令和排程發佈都靜靜壞掉;
+10/25 重裝 3.14.9 並標成「主動安裝」。**不准在沒問使用者的情況下跑 brew uninstall / autoremove / cleanup / upgrade。**
 
 ## 2. 指令
 
 ```bash
-cd "/Users/liunils/Desktop/Marketing hack"
+cd "/Users/liunils/Desktop/Marketing hack" && source .venv/bin/activate
 
-./.venv/bin/contentmaster run                     # 額外貼文:extract → draft → 人審 → 核准即發佈
-./.venv/bin/contentmaster run --posts 3           # 一次 3 篇額外貼文
-./.venv/bin/contentmaster run --cluster           # 下週的 cluster:7 篇,核准「不」發佈,等排程
-./.venv/bin/contentmaster run --terminal          # 留在終端機審,不開瀏覽器
-./.venv/bin/contentmaster run --no-image          # 不生圖
-./.venv/bin/contentmaster review                  # 24h checkpoint 分析
-./.venv/bin/contentmaster review --checkpoint 7d  # 7d(一篇一個 tier 只能決定一次)
-./.venv/bin/contentmaster refresh                 # 只重讀成效數字,隨時可跑
-./.venv/bin/contentmaster status                  # 什麼在等人
-./.venv/bin/contentmaster clusters                # 每個 cluster 和裡面的貼文
-./scripts/run_tests.sh                            # 18 個測試套件
-./.venv/bin/python scripts/update_golden.py       # 改 golden 檔（互動確認,要先讀 diff）
+contentmaster run --cluster          # 填目前這週 cluster 的空日子;沒有在跑的 cluster 才開新的
+contentmaster run                    # 額外貼文(kind=extra),核准即發佈
+contentmaster run --posts 3 / --terminal / --no-image
+contentmaster schedule --time 18:00 [--cluster 1]   # 跟審核頁 Schedule 分頁同一個函式
+contentmaster publish-due            # 發出時間已到的排程貼文(Mac 在發文時間跑的就是這個)
+contentmaster clusters               # 每個 cluster 和裡面的貼文
+contentmaster status                 # 什麼在等人;排程中的;過期沒發的(!! OVERDUE)
+contentmaster review [--checkpoint 7d]
+contentmaster refresh                # 重讀成效 + 誰互動 + 帳號快照
+./scripts/run_tests.sh               # 20 個套件
 ```
+審核頁(streamlit,`run`/`review` 會自動開):**Draft review / Analysis review / Schedule** 三個分頁。
 
-沒給 `--product-name` 時,會沿用**人上次給這份文件取的名字**(目前 = `Fluffy roommate`)。
+## 3. 資料
 
-查某篇貼文分析的每一步(先在 `warehouse/` 跑 `dbt run`):
-```sql
-select step_no, step, role, model, raw from stg_reasoning
-where post_id = '…' and checkpoint = '7d' order by ts, step_no;
-```
+### 每張表一列代表什麼(append-only,同一個 key 取最新那列)
 
-## 3. 資料:每張表一列代表什麼
-
-原始紀錄都是 **append-only、最後一列為準**(同一個 key 取最新那列)。
-
-| 檔案 | 一列 = | 內容 |
+| 檔案 | 一列 = | 重點欄位 |
 |---|---|---|
-| `plays/_posts.jsonl` | 一篇貼文的一次狀態變更 | `natural_id`、`post_id`、`cluster_id`、`kind`、`experiment`、`status`、`scheduled_for`… **沒有內文** |
-| `plays/_clusters.jsonl` | 一個 cluster 的一次狀態變更 | 週一日期、hypothesis、experiment 星期、`learned_from` |
-| `plays/_draft_review.jsonl` | 一份草稿的一次狀態變更 | **所有草稿內文**(含退件)、圖片路徑、標籤 |
-| `plays/_tracking_review.jsonl` | 一篇已發佈貼文的一次更新 | 實際發出的 `final_text`、`environment`、`checkpoints_done` |
-| `plays/_analysis_review.jsonl` | 一份分析(post×checkpoint)的一次狀態變更 | 等人 confirm/disagree 的分析 |
-| `plays/_history.jsonl` | 一篇貼文 × 一個 checkpoint 的最終判定 | 人決定後才寫;帶 `post_id`、`tests_hypothesis_id`、`next_hypothesis`、`hypothesis_result`、`reasoning_id` |
-| `plays/_reasoning.jsonl` | 一次分析執行的所有模型步驟 | 每個模型的 prompt + 原始回覆 + 解析結果 |
-| `plays/_failures.jsonl` | 一次失敗 | ⚠️ 混了「人審退件」和「發佈後 checkpoint 沒過」 |
-| `metrics/post_metrics.jsonl` | 一次成效讀取 | refresh 每次加一列 |
-| `plays/_products.jsonl` | 一個產品名的一次更新 | `explicit` = 人打的名字 |
-| `plays/topics/fluffy-roommate.json` | 一個產品一份檔 | 41 個主題 + category |
+| `plays/_posts.jsonl` | 一篇貼文的一次狀態變更 | `natural_id`(核准時給)、`post_id`(UUID)、`cluster_id`、`kind` cluster/extra、`experiment`、`status`、`scheduled_for`、`scheduled_at`、`published_at`、`late_minutes`、`seq` |
+| `plays/_clusters.jsonl` | 一個 cluster 的一次狀態變更 | 週一、hypothesis、experiment 星期、`post_time`、`status`(drafting/scheduled/cancelled)、`learned_from`、`seq` |
+| `plays/_draft_review.jsonl` | 一份草稿的一次狀態變更 | **內文**、圖片路徑、`image_description`/`image_check`(Gemma)、`arm_check`、標籤 |
+| `plays/_tracking_review.jsonl` | 已發佈貼文的一次更新 | 實際發出的 `final_text`、`environment` |
+| `plays/_analysis_review.jsonl` | 一份分析的一次狀態變更 | 等人 confirm/disagree |
+| `plays/_history.jsonl` | 貼文 × checkpoint 的最終判定 | `next_hypothesis`、`hypothesis_result`(黏著度)、`reasoning_id` |
+| `plays/_reasoning.jsonl` | 一次分析的所有模型步驟 | 顧問 / 裁判的 prompt + 原始回覆 |
+| `plays/_account.jsonl` | 一次帳號快照 | 追蹤者數(每次發文和 refresh 記一筆) |
+| `metrics/post_metrics.jsonl` | 一次成效讀取 | 四個數字 + `engagers`(誰按讚 / 轉發 / 回覆) |
 
-DuckDB(`warehouse/`):`stg_posts`(一篇一列)、`stg_clusters`(一個 cluster 一列)、
-`stg_reasoning`(一次模型呼叫一列)、`stg_success_history`(post × checkpoint)。
-⚠️ `campaign_performance` 混了兩種粒度(每產品×平台一列「目前最好」+ 每次失敗一列),不要拿來加總。
+DuckDB:`stg_posts`(一篇一列)、`stg_clusters`(一個 cluster 一列)、`stg_reasoning`(一次模型呼叫一列)、
+`stg_success_history`。⚠️ `campaign_performance` 混兩種粒度,不要加總。
+**join 的主鍵是 `post_id` → `stg_posts.cluster_id`。** 還沒有 `cluster_id` 的表見 §0 Claude 第 2 項。
 
-ID 規則:`post_id` 新貼文是完整 UUID(舊的是 `draft-xxxxxxxx`)。`natural_id` 在**核准時**才給,
-退件不佔號,依產品×平台各自從 1 數。舊的 10 篇是 cluster 0 的 #1–#10(#7 被手動刪除,保留號碼)。
+### 指示在哪裡(全部寫在 Python 裡,還沒搬到 `prompts/`)
+| 用途 | 位置 |
+|---|---|
+| 寫草稿 | `draft_generator.py` `_llm_draft_posts_for_topics`、`_post_field`、`_hypothesis_instruction`、`_subject_description`、`_llm_draft_posts`、`revise_post` |
+| 顧問 / 裁判 | `discuss.py` `_proposal_prompt`、`_hypothesis()` 和 `_evidence_strategy()` 裡的 `judge_prompt` |
+| 角色檢查 | `arm_check.py` `PROMPT` |
+| 看圖 | `image_review.py` `PROMPT` |
+| 生圖指令 | `image_generator.py` `_PROMPT_INSTRUCTION` |
+| 主題整理 | `topic_index.py` `_REFORMAT_INSTRUCTION` |
+
+框架句子是固定的;hypothesis、內文、主題、圖片描述在執行時填入。
 
 ## 4. 已決定的事(附理由 —— 不要推翻,除非使用者改口)
 
-### 成效怎麼算
-- `engagement_score = 3×repost + 3×bookmark + 1×like + 1×reply`(加權和)。quote 有記錄、不算分。
-- 只跟同一個 checkpoint 比(24h 只比 24h)。
-- 舊門檻(跨 cluster 的長期比較用):≥8 篇可比 且 ≥10 個互動 → 否則 `hypothesis`;
-  ≥1 repost/bookmark 且 > p75 → 否則 `likes_only`/`below_baseline`;<20 篇 → `proven_tentative`。
+### 成效與 hypothesis
+- `engagement_score = 3×repost + 3×bookmark + 1×like + 1×reply`。
+- hypothesis = **TEST / WHY**。**看什麼是固定的,模型不選**(10/22):
+  - **粉絲黏著度** = 這篇的互動者裡,以前也互動過的比例(bookmark 在 Bluesky 是私密的,不算)。
+    沒人互動 = 「沒有黏著度」,不是 0%;讀不到誰互動 = 「未知」。
+  - **追蹤變化量** = 一個 cluster 週的淨增加,只比 cluster 之間。
+- 沒有「什麼代表錯」。使用者原話:「沒有錯這個東西,只有當下環境不適合。」
+- 裁判只回 `PICK: A|B` + `REASON`,不改寫。**只有使用者按 Confirm 的 hypothesis 會被下一個 cluster 用**(10/20)。
+- 每一步都留(使用者:「回朔或 trouble shoot 的時候才照得到東西」)。
+- **搜尋趨勢關閉**(10/21,`TRENDS_ENABLED=0`):資料停在 9/13,顧問一直拿它出題。
+- **50 追蹤者以前**,目標是衝到 50 追蹤者。
 
-### hypothesis
-- 格式 **TEST / WHY / WATCH**。WATCH 只能是 likes / reposts / replies / bookmarks(系統讀得到的四個)。
-- **沒有「什麼代表錯」** —— 使用者原話:「沒有錯這個東西,只有當下環境不適合。」
-  結果只說「動了」/「在這些條件下沒動」,附發文環境(追蹤者、星期幾幾點、有沒有圖、trend 日期)。
-- 裁判只回 `PICK: A|B` + `REASON`,**不改寫**;存的是顧問原文。WATCH 讀不到數字的提案不能參選。
-- **每一步都留**(使用者原話:「回朔或 trouble shoot 的時候才照得到東西」):每個模型呼叫的
-  prompt、原始回覆存在 `_reasoning.jsonl`,用 `post_id` 找得到。
-- 測完要收尾:7d 分析遇到測試貼文,讀它 WATCH 的數字 vs 同 checkpoint、**沒測**這個假設的貼文中位數(≥2 篇才比)。
+### 模型分流(10/21–10/24)
+- **圖片交給 Gemma**:看每張圖、寫一句描述、檢查相符 / 有字 / 捏造。文字模型拿描述、被告知只改文字。
+  Gemma 只檢查,**不提圖片測試**(一週只測一件事)。
+- **角色檢查**:每篇 cluster 草稿寫完問 Gemma「有沒有做這週的改變」。主要方向答否、experiment 答是 → 丟掉重寫。
+  有一次誤判(有問句的被判沒有),重試補上了。
 
-### cluster(2026-10-06/07 和使用者一起設計)
-- **一個 cluster = 一個日曆週(週一到週日)、一個 hypothesis、7 篇,一天一篇。**
-- 5 篇 `experiment=false` 照 hypothesis 寫;**2 篇 `experiment=true`(20%,無條件進位)故意不做那個改變**。
-  使用者原話:「experiment means the 20% posts needs to be different than the rest」。
-- experiment 的星期**照 cluster 編號輪替**,不照月曆:1→一/四、2→二/五、3→三/六、4→四/日…
-  任何連續 7 個 cluster 每個星期幾剛好 2 次。
-- 跨月的 cluster 不拆開,算在**週一所在的月份**。分析單位是 cluster,不是月。
-- 為什麼一週:cluster N 的第 1 篇滿 7d 的那天剛好是下週一,當天就能決定 N+1,不用等。
-- **額外貼文**(`run --posts N`):`kind=extra`,掛在當週 cluster 下,**不算進比較**;
-  互動很多或那週追蹤者暴增 → 該 cluster 結論標「可能受影響」。使用者確認保留這個指令。
-- **checkpoint 的分工**:24h 決定細節修改 / 7d 決定下一個 cluster 的大方向 / 30d 綜合比較。
-- 24h **只在明顯變化時**才改還沒發的貼文:某篇 ≥10 個互動 **且** ≥ cluster 中位數 3 倍。
-  否則只記數字,不叫模型。改了要重新人審。改的東西不能動到正在測的那件事。
-- cluster 結論門檻:一個 cluster 合計 ≥10 個互動(追蹤者 <50 時見下)。
-- 一個 cluster 用**同一個發文時間**(時段本身是環境條件)。
-- 「沒有觀眾」門檻 **50 追蹤者**。使用者原話:「before 50 followers the hypothesis test goal is to get 50 followers」。
-  設計見 §6 第 3 項(**還沒確認**)。
-- 對照組規則(rolling 20% control quota)在 cluster 內關閉 —— experiment 那 2 篇就是對照。
+### cluster
+- **一個日曆週(一到日)、一個 hypothesis、7 篇**。5 篇主要方向、2 篇 experiment(20% 無條件進位)。
+- experiment 星期照 cluster 編號輪替:1→一/四、2→二/五、3→三/六、4→四/日…(不照月曆)。
+- 跨月算週一所在的月;分析單位是 cluster。
+- **`run --cluster` 規則(10/26 修正)**:先補「還在跑、還有空日子」的 cluster(過去的日子不補);
+  目前的 cluster 還在跑而且滿了 → **不開下一個**(下一個要等這週的結果);沒有在跑的 → 今天是週一就從今天開,否則下週一。
+- 只給模型一個主題時,直接用那個主題(模型寫錯主題名也一樣)。
+- 額外貼文 `kind=extra`:不進比較,但掛在當週 cluster 下。
+- cluster 可以**取消**:沒發的貼文標 `cancelled`,編號保留不重用,那一週可以重開;取消的不能排程。
+
+### 排程發佈(10/25,使用者同意:「自動發佈按鈕」= 人逐篇核准 + 人按排程)
+- 核准 cluster 貼文**不發佈**,只給 `natural_id`;發佈守門在**核准時**就跑(排程發佈時沒人在看)。
+- 一個 cluster 一個發文時間(半小時一格 06:00–23:30)。排程後才核准的自動加入。
+- **Mac 只在發文時間醒來**(launchd `com.contentmaster.publish`,每個時間一個 `StartCalendarInterval`),
+  不是每 5 分鐘檢查(使用者要求)。經過 `scripts/publish_due.sh`:環境壞了會跳 macOS 通知。
+- 睡著錯過 → 醒來補發並記 `late_minutes`。網路 / 流量失敗留在排程下次再試;內容被拒標失敗。pid 鎖防重發。
+- 隔離資料夾(測試)**永遠不碰** launchd、不開瀏覽器。
 
 ### 不做的
-- **Elasticsearch**:回饋亂是內容沒結構,不是搜尋問題;資料幾百筆;8GB 已跑五個模型。累積幾千篇再評估,先試 Cognee。
-- **限定 hypothesis 只能改寫法**:使用者說不要(2026-10-12)。
-- **寫 7 篇前先讓人確認 hypothesis**:使用者說不要。
-- **換模型**:使用者說現在不要,實測等他通知。
+Elasticsearch(資料量小、問題是內容沒結構)、限定 hypothesis 只改寫法、寫 7 篇前讓人確認 hypothesis、
+換顧問以外的模型(等使用者通知)。
 
-## 5. 這段時間的 log
+## 5. Log
 
-**9/30 – 10/05**
-- pandoc 三層抽取取代 Cognee(文件宣告的 heading → 位置+粗體啟發式 → 人撿回)。41 個主題。
-- 表格章節按欄位摘要(`Comparing lifestyle risks`)。golden 已更新。
-- streamlit 用 `sys.executable -m streamlit` 啟動(裸的 `streamlit` 找到系統 Python → `ModuleNotFoundError`)。
-- hypothesis 全流程重寫:TEST/WHY/WATCH、裁判只選、每一步存 `_reasoning.jsonl`、發文環境、草稿帶 hypothesis。
-- 對照組只在有基準線之後啟用。
-- 測完收尾:7d 讀 WATCH 數字。
+- **9/30 – 10/05**:pandoc 三層抽取(41 主題)、表格按欄位摘要、streamlit 用 venv 的 Python、hypothesis 全流程重寫、
+  對照組只在有基準線後啟用、測完讀結果。
+- **10/06 – 10/10**:cluster 資料層、產品名 `cat` 併入 `Fluffy roommate`、`run --cluster`、審核頁過時自動重啟、太長的草稿先縮短。
+- **10/20**:只有 Confirm 的 hypothesis 會被用。
+- **10/21 – 10/22**:趨勢關閉;Gemma 看圖;黏著度 + 追蹤變化量;分析版本升到 4(舊分析重跑)。
+  測試不再開審核頁(兩個測試套件曾經每跑一次就開瀏覽器)。
+- **10/23**:顧問 B mistral → gemma3:4b(重播 9 份真實指示比較);刪 granite。
+- **10/24**:角色檢查(週四 experiment 有問句被人眼抓到 → 自動化);指示段落標題被當主題名 → 修;重試中的失敗不再顯示 `[error]`。
+- **10/25**:「必須 / 不准」寫在 POST 欄位旁(主要方向 0/2 → 2/3);日期顯示 `Cluster 1 · Wed 2026-10-28 · Main …`;
+  **排程發佈**;Python 環境消失 → 重裝 + 防範(通知、OVERDUE、規則)。
+- **10/26**:`run --cluster` 在 cluster 自己的週一開了 cluster 2、Schedule 預設選最新 → **週一 #11 錯過 18:00**。
+  修:先補在跑的 cluster、預設選本週、可取消。**取消 cluster 2(#16–18)**;排程 cluster 1 18:00;
+  **#11 於 20:57 補發(晚 177 分鐘,使用者同意)**。只給一個主題時直接用。取消的 cluster 不能排程。
 
-**10/06 – 10/10**
-- cluster 第 1 段(資料):`posts.py`、`clusters.py`、`contentmaster clusters`、`stg_posts`/`stg_clusters`。
-  同一秒寫兩列時 `ts` 打平 → 加 `seq`。
-- 產品名:`cat.rtfd` 被預設成產品 `cat`,10/05 那篇變成另一個歷史的 #1。使用者確認是同一產品,
-  已用追加列併進 `Fluffy roommate`;沒給 `--product-name` 時改為沿用人取過的名字。
-- cluster 第 2 段(產生):`run --cluster`。真實模型實跑抓到:模型拿掉章節編號和彎引號 → 主題對不上全被丟;
-  顧問提「改文件」;裁判選了量不到的假設;錯誤訊息把「全被丟」說成「沒回應」。都修了。
-- 審核頁會自動重啟:開在程式修改前的 streamlit 會讀新頁面但用舊模組 → `ImportError: NotSchedulable`。
-- 太長的草稿先請模型縮短一次:約 1/3 的草稿超過 300 字(302、747),`--posts 1` 就整輪空手。
-- 模型調查:查了 Ollama 模型庫,下載 3 個候選。實測做了一半(只跑了 qwen3:4b 當裁判的基準)就停 ——
-  **它佔住 Ollama,讓使用者的 `run` 逾時**。之後實測一律等使用者說可以。
+全部已 push 到 `origin/main`。
 
-全部已 push 到 `origin/main`(最後 `c52e011`),之後只有這份交接文件。
+## 6. 現在的狀態(10/26 21:30)
 
-## 6. 下一步(依序)
+**Cluster 1**(10/26–11/1,hypothesis `hyp-6a35ba4f`「每篇至少一個問句」,learned_from 0)
 
-1. **新模型實測 —— 等使用者通知,不要自己開始。**
-   腳本在 scratchpad 已不存在,要重寫:同一份 cluster-start 顧問 prompt(`discuss._proposal_prompt`
-   + 41 個主題),每個模型 3 次;裁判用兩個真實提案問 PICK。用 Ollama 原生 `/api/chat`
-   才能控制 `think`。**跑的時候 Ollama 會被佔住 15–20 分鐘。**
-   建議組合(待實測):顧問 A `granite4.2:8b`、顧問 B `gemma4:e2b`、裁判 `qwen3.5:4b`(三個不同家族)。
+| 日 | 角色 | 狀態 |
+|---|---|---|
+| 一 10/26 | experiment | ✅ #11 已發佈(晚 177 分鐘) |
+| 二 10/27 | 主要 | 🕒 #12 18:00 |
+| 三 10/28 | 主要 | 🕒 #13 18:00 |
+| 四 10/29 | experiment | 🕒 #14 18:00 |
+| 五 10/30 | 主要 | 🕒 #15 18:00 |
+| 六 10/31 | 主要 | 📝 1 篇待審(名字寫成 Furry,建議退) |
+| 日 11/1 | 主要 | 🕒 #19 18:00 |
 
-2. **cluster 第 3 段:排程與自動發佈 —— 等使用者確認做法。**
-   已同意:審核頁加「時間下拉選單 + Schedule post 按鈕」,整個 cluster 一個時間;用這台 Mac;
-   核准後才能排程(這就是交接說的「之後做出自動發佈按鈕」——每篇都人核准過)。
-   **待確認**:使用者質疑「每 5 分鐘檢查」。最新提案是 launchd 只在發文時間叫醒一次
-   (`StartCalendarInterval`),睡著錯過時醒來補發,環境記實際發出時間。
-   注意 Bluesky 沒有內建排程 API。發佈要走 `step5_publish` / `step6_queue_for_review`
-   (guard 已在核准時跑過,見 `approve_for_schedule`)。
-
-3. **cluster 第 4 段:分析 —— 使用者說 ok,但追蹤者的設計要先確認。**
-   - 24h 明顯變化觸發(≥10 互動 且 ≥3× 中位數)→ 只改還沒發的、要重新核准。
-   - 7d → 決定下一個 cluster 的 hypothesis(`run --cluster` 已會讀最新已決定分析的 `next_hypothesis`)。
-   - 30d → cluster 結論:5 篇主要 vs 2 篇 experiment,門檻,額外貼文影響標記。
-   - **追蹤者 <50 時,WATCH = 新增追蹤者**。最新提案(**待確認**):按天拆 ——
-     這篇帶來的 = 下一篇發佈時的追蹤者 − 這篇發佈時的追蹤者(環境紀錄已有);週日那篇用下個 cluster 週一;
-     有額外貼文的那天標「受影響」不算;結論門檻「一週至少 +5 追蹤者」。
-     要新增 `followers` 當 WATCH 的合法值,顧問 prompt 在 <50 時要求 WATCH=followers。
-
-4. **重跑 8 份舊格式 7d 分析**:`contentmaster review --checkpoint 7d`(還沒消耗 checkpoint)。
-   另外 1 篇到期要跑 24h。由使用者執行。
-
-5. 之後(交接舊排程):trend 自動化(停在 2026-09-13,手動 CSV,沒 API);
-   `post.deleted` 重複 5 次要從源頭防;UI 生圖開關、可檢索 error index、平台層級學習規則(SCHEDULE Phase 11)。
-
-已知品質問題(還沒處理):`llama3.2:3b` 有時寫出**只有標題**的貼文(34 字、「The Purr-fect Toy: …」),
-`publish_guard` 擋不住,靠人審退件;experiment 篇偶爾沒照「不要做這個改變」寫。
-錯誤訊息若能分辨「Ollama 正在忙別的請求」會更好查。
+Cluster 2(11/02 週)**已取消**(#16–18),紀錄保留。cluster 0 = 舊的 #1–#10。
+待決定分析 0(使用者 9 份都按了 Confirm)。帳號快照 1 筆(之後每次發文一筆)。launchd 已安裝,`runs = 0`。
+全帳號掃描:沒有資料不一致。
 
 ## 7. 測試
 
-`./scripts/run_tests.sh` — 18 個套件,每個吃一個暫存目錄當 `CONTENTMASTER_DATA_ROOT`,印編號的中文斷言。
+`./scripts/run_tests.sh` — **20 個套件**,每個用暫存目錄當 `CONTENTMASTER_DATA_ROOT`(不開瀏覽器、不碰 launchd)。
 
 | 套件 | 測什麼 |
 |---|---|
-| **test_golden_extraction** | 真實文件抽取逐字比對 golden(41 主題、第 21 項按欄位)+ 8 條不變條件 |
-| test_headings | 三層抽取,39 項(含表格三種形式) |
-| test_topic_extraction | 主題解析與造假防護 |
-| test_scoring_gates | 兩道閘門與五種狀態 |
-| test_evidence_gating | 沒基準線時問 TEST/WHY/WATCH,沒有「什麼代表錯」 |
-| **test_hypothesis** | 24 項:真實模型回覆解析、裁判只選不改寫、每步存且帶 post_id、讀不出 vs 沒回應、兩介面同一畫面、草稿帶 hypothesis、無基準線不要求對照組、環境、history 追溯、測完讀 WATCH、量不到的不能參選 |
-| **test_clusters** | 7 項:輪替、週一開始、跨月、natural_id 規則、cluster 0 回填、同秒 seq、產品名沿用 |
-| **test_cluster_run** | 12 項:`run --cluster` 全流程、主要/experiment 指示、核准不發佈+guard、只補空格、learned_from、額外貼文、模型拿掉章節編號/彎引號、太長先縮短 |
-| test_parsers / test_no_invented_content / test_category_* / test_image_validation / test_subject_and_no_image / test_rtfd_bundle / test_folders / test_judge_model / test_video | 見各檔開頭 |
+| test_golden_extraction | 真實文件抽取逐字比對 golden |
+| test_headings / test_topic_extraction / test_parsers / test_rtfd_bundle / test_folders | 抽取與解析 |
+| test_scoring_gates / test_evidence_gating | 門檻;沒基準線問 TEST/WHY;趨勢關閉 |
+| **test_hypothesis**(24) | 真實回覆解析、裁判只選、每步帶 post_id、黏著度、追蹤變化、Gemma 圖片描述進顧問指示 |
+| **test_clusters**(7) | 輪替、週一、跨月、natural_id、cluster 0、seq、產品名 |
+| **test_cluster_run**(21+) | `run --cluster` 全流程、角色檢查、核准不發佈、只補空格、**在 cluster 自己的週一不開下一個**、預設選本週、取消、單一主題 |
+| **test_scheduler**(7) | 一個時間套整週、核准後自動排、只發到期的、晚發記錄、失敗分類、鎖、launchd 設定且測試沒碰真的 |
+| **test_image_review**(5) | Gemma 真實回覆、捏造裝置被抓、讀不出≠通過、誰互動的紀錄規則 |
+| 其他 | test_category_*、test_image_validation、test_subject_and_no_image、test_judge_model、test_no_invented_content、test_video |
 
-新測試的慣例:**用真實模型的原樣回覆當 fixture**,寫完要**故意把程式改壞,確認測試會失敗**。
+慣例:**用真實模型的原樣回覆當 fixture**;寫完要**故意改壞程式確認測試會失敗**;**改指示前先跑真實模型看回什麼**。
 
 ## 8. 使用者的要求(原話,不要違背)
 
-- **全部用繁體中文回覆**,包括做事中途的進度說明。程式碼、指令、檔名維持英文。對外成品(貼文、commit 訊息)用英文。
-- **「你不准在沒跟我說的情況下亂開背景。」** 開背景程序(streamlit、下載、長時間測試)前先講。
-- **Ollama 被佔用時使用者的 `run` 會逾時** —— 跑模型實測前要使用者同意。
-- **「產品名由人類改,llm不准動。」**
-- **「無論如何llm不允許自動發佈,除非之後我們做出自動發佈按鈕。」** —— 排程發佈 = 每篇人核准 + 人按排程。
-- **「我不要你分析或丟想法」** —— 要原始輸出時只給原始輸出。
-- **「我不需要看到不重要的文字…講重點。」「don't give me technical term」** —— 白話。
-- 模型或套件的決定:**先說再改**。
-- push:每次都要使用者說可以。
+- **全部用繁體中文回覆**,包括中途進度。程式碼、指令、檔名維持英文;commit 訊息、對外貼文用英文。
+- **「你不准在沒跟我說的情況下亂開背景。」** 下載、長時間測試、streamlit 都要先講。
+- **「when you're building and testing keep in the backend with streamlit. it keeps popping up is annoying.」**
+  測試和檢查不准開瀏覽器;要看畫面就用 `--server.headless true`、8502 以上的 port、隔離資料夾,看完關掉。
+- **跑模型實測會佔 Ollama,使用者的 `run` 會逾時** —— 先問。
+- **「產品名由人類改,llm不准動。」** 程式裡不准寫死產品名。
+- **「無論如何llm不允許自動發佈,除非之後我們做出自動發佈按鈕。」** 排程 = 人逐篇核准 + 人按排程。
+  補發過期貼文(`publish-due`)也要使用者說可以。
+- **不准在沒問的情況下動 Homebrew**(uninstall / autoremove / cleanup / upgrade)。
+- 「我不要你分析或丟想法」(要原始輸出時)、「講重點」、「don't give me technical term」。
+- 模型或套件的決定:**先說再改**。push:每次都要使用者說可以。
 
 ## 9. 已知陷阱
 
-**每個新觀念只被套用在它誕生的那個位置。** 這個 repo 反覆出現(已十次以上):terminal 和 Streamlit
-兩個審核介面不同步、同一份欄位清單寫了四份、`run` 和 `video` 各自一份產品名預設。
-**改任何規則前先 grep 有幾個地方用到同一個概念。** 共用的東西放在兩個介面都會呼叫的那一層
-(`approve_for_schedule`、`record_rejected`、`hypothesis.review_view`、`LABEL_KEYS`)。
-`.claude/skills/two-review-surfaces/` 和 `.claude/skills/parse-what-models-return/` 有案例。
+**同一個觀念只在誕生的地方生效。** 出現十次以上:兩個審核介面不同步、欄位清單寫四份、`run`/`video` 各一份產品名預設、
+Schedule 分頁和 CLI 各自選預設 cluster。改規則前先 grep;共用的放兩個介面都會呼叫的那一層。
 
-**測試通過不等於正確 —— 要跑真實模型。** cluster 第 2 段的測試一次全過,真實模型一跑就發現四個問題。
-解析器照真實回覆寫(WATCH 實際回來是 `100 likes`、`Reposts (shares) as…`、`Likes or reposts…`)。
+**測試通過不等於正確 —— 跑真實模型、看真實資料。** 這兩週每一段都是真實實跑才抓到問題
+(主題名對不上、標題被當主題、角色站錯邊、日期算錯、預設選錯 cluster)。
 
-**時間戳記只到秒會打平。** `_posts.jsonl` 和產品名紀錄都踩過:同一秒寫兩列,SQL 或「最新」取到舊的。用 `seq` 或寫入順序。
+**日期邊界要測「當天」。** `week_start_after` 在週一回傳下週一,`run --cluster` 在 cluster 自己的週一就開了下一個。
+任何「本週 / 下週」的邏輯,都要測週一、週日、跨月。
 
-**streamlit 會留著舊模組。** 已自動處理(`_stale_review_server`),但只認得用絕對路徑啟動的那個。
-手動驗證 UI 時:`CONTENTMASTER_DATA_ROOT=<暫存> ./.venv/bin/python -m streamlit run "$PWD/streamlit_app.py" --server.port 8502`。
+**時間戳記只到秒會打平。** 用 `seq` 或寫入順序決定「最新」。
 
-**啟發式門檻是為這一份白皮書調的**(`MAX_HEADING_WORDS = 12` 等)。別人的文件靠第 1 層或人撿回,不是調數字。
+**streamlit 會留著舊模組**(已自動重啟,但只認絕對路徑啟動的)。**`.venv` 依賴 Homebrew Python**(見 §1)。
 
-**`.venv` 連到 Homebrew 的 python@3.14。** 2026-10-24 晚上它被移除(原因不明,使用者沒跑 brew),
-所有指令和排程發佈都靜靜壞掉。已重裝並標成「主動安裝」(autoremove 不會再拿走)。**不准在沒問過使用者的情況下
-跑 brew uninstall / autoremove / cleanup / upgrade。** 排程發佈經過 `scripts/publish_due.sh`:環境壞了會跳 macOS 通知;
-`contentmaster status` 會列出過期沒發的貼文。看到 `.venv/bin/python` 找不到,先查 `ls /opt/homebrew/Cellar | grep python`。
+**小模型的限制**:`llama3.2:3b` 會寫出只有標題的貼文、把指示段落標題當主題、忘記遠處的要求(要寫在欄位旁)、
+把產品名寫錯(Furry)。`publish_guard` 擋不住「只有標題」。
 
-**`.env` 有憑證**(Bluesky、Cloudflare、Cognee 密碼)。不要印出來、不要寫進任何文件。
+**`.env` 有憑證**(Bluesky、Cloudflare、Cognee 密碼)。不要印出來、不要寫進文件。

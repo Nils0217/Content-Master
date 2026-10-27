@@ -21,6 +21,78 @@ runtime failure?) and a tag can be changed later while a file move cannot.
 
 ---
 
+### `run --cluster` on a cluster's own Monday opened next week's cluster; Monday's post missed its time (2026-10-26)
+
+**Kind:** pipeline
+
+**Symptom:** the Schedule tab showed a "Cluster 2" for the week of 11/02 while
+cluster 1's weekend was still empty; "only 3 got scheduled"; post #11
+(Mon 10/26) never went out at 18:00.
+
+**Cause:** `run_cluster` always targeted `week_start_after(today)` — the next
+Monday *strictly after* today — so on cluster 1's own Monday it opened
+cluster 2 instead of filling cluster 1. The Schedule tab and `contentmaster
+schedule` both defaulted to the newest cluster, so the human scheduled
+cluster 2 and cluster 1's five approved posts never got a time.
+
+**Fix:** `clusters.target()` fills the earliest running cluster with an open
+day first, refuses to open the next while one is running, and opens on
+today when today is a Monday. `scheduler.default_cluster()` picks the
+running cluster with approved posts waiting. `clusters.cancel()` withdrew
+cluster 2. #11 was published late (177 min) with the user's go-ahead.
+
+### `.venv/bin/python: no such file or directory` — Homebrew python@3.14 vanished (2026-10-24)
+
+**Kind:** engineering
+
+**Symptom:** every `contentmaster` command fails; `ls .venv/bin/python` shows
+a symlink to `/opt/homebrew/opt/python@3.14/bin/python3.14`, which no
+longer exists. A scheduled publish would fail silently.
+
+**Cause:** unknown. No brew commands in the user's shell history; nothing in
+this project's sessions ran brew. python@3.14 had no dependents, so any
+`brew autoremove` (or an upgrade/cleanup that runs it) would take it.
+
+**Fix:** `brew install python@3.14` (3.14.9, now "installed on request").
+`scripts/publish_due.sh` checks the env before publishing and raises a
+macOS notification if it is broken; `contentmaster status` lists overdue
+posts. Rule: nobody runs brew uninstall/autoremove/cleanup/upgrade without
+asking the user.
+
+### A drafting model named the topic "A domestic cat" / "GROUNDING" and every draft was dropped (2026-10-24/27)
+
+**Kind:** pipeline
+
+**Symptom:** `[dropped] A draft named topic 'A domestic cat', which is not in
+this product's index` repeated on every attempt; a cluster day stayed empty.
+
+**Cause:** llama3.2:3b paraphrases the topic ("1. Introduction" → "A domestic
+cat") or copies an instruction heading ("GROUNDING") into TOPIC.
+
+**Fix:** with exactly one topic offered, that topic is used whatever TOPIC
+says; the TOPIC instruction says to copy a `- ` line from the list, never a
+heading. Section numbers and curly quotes are normalised in matching.
+
+### Tests opened a browser tab and started a review server on every run (2026-10-22)
+
+**Kind:** engineering
+
+**Cause:** two suites reached `launch_streamlit()` through `_run_streamlit`,
+so `run_tests.sh` opened a tab and started a server on a scratch data root.
+
+**Fix:** `launch_streamlit()` returns early for an isolated data root; the
+same rule keeps tests away from launchd (`scheduler.sync_agent`).
+
+### `ImportError: cannot import name 'NotSchedulable' from 'contentmaster.pipeline'` (2026-10-07)
+
+**Kind:** engineering
+
+**Cause:** a review server started before a code change keeps the old modules
+in memory while each page load re-reads `streamlit_app.py`.
+
+**Fix:** `launch_streamlit()` restarts a server older than the newest source
+file (`_stale_review_server`) instead of reusing it.
+
 ### human_loop.py's [e]dit prompt published a reviewer's *feedback* as the literal post text
 
 **Kind:** `pipeline`

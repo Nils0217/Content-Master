@@ -18,6 +18,8 @@ plays/_test_axes.jsonl
 plays/_reasoning.jsonl
 plays/_posts.jsonl
 plays/_clusters.jsonl
+plays/_account.jsonl
+plays/.publish.lock
 metrics/*.jsonl
 .rocketride/
 pipelines/services-catalog-reference.json
