@@ -27,7 +27,7 @@ assert "({_MODEL_A})" not in src
 print("3. 裁判 prompt 不含模型 ID ✅")
 
 # 4. a failed synthesis still returns something usable (evidence mode)
-d._complete = lambda m, p, timeout=90: ("A says x" if m != "qwen3:4b" else None)
+d._complete = lambda m, p, timeout=90, **log: ("A says x" if m != "qwen3:4b" else None)
 from contentmaster.analysis import AnalysisResult
 a = AnalysisResult(product="P", channel="bluesky", checkpoint="24h", n_prior_posts=9,
     historical_avg_score=1.0, current_score=0.0, trend="flat",

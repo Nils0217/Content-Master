@@ -35,7 +35,8 @@ def record(reasoning_id: str, *, post_id: str | None, checkpoint: str | None,
     came back, None if the call failed) and `parsed`.
 
     `outcome` names what happened, so an empty result is never ambiguous:
-    "picked" / "only_one_usable" / "judge_unusable" / "none_usable" /
+    "picked" / "only_one_usable" / "judge_no_response" (judge call failed) /
+    "judge_unusable" (judge replied, no readable pick) / "none_usable" /
     "no_response" for a hypothesis; "synthesized" / "unmerged" /
     "single_model" / "no_response" for an evidence-based strategy.
     """

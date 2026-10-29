@@ -30,7 +30,7 @@ A = ("TEST: asking a question in the introduction instead of making a statement\
      "WATCH: 20% increase in likes")
 B = ("TEST: Incorporate a reference to the trending \"cat in the hat\" in the post title.\n"
      "WHY: The current trend could attract more attention.\nWATCH: Reposts (shares)")
-d._complete = lambda m, p, timeout=90: {d._MODEL_A: A, d._MODEL_B: B, d._JUDGE_MODEL: "PICK: A\nREASON: one clear change"}[m]
+d._complete = lambda m, p, timeout=90, **log: {d._MODEL_A: A, d._MODEL_B: B, d._JUDGE_MODEL: "PICK: A\nREASON: one clear change"}[m]
 
 # 寫草稿的模型:照 prompt 要幾篇就給幾篇,TOPIC 用 prompt 裡第一個主題
 prompts, short = [], {"n": 0}

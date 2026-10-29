@@ -87,9 +87,11 @@ print("6. 沒基準線:問 TEST/WHY,固定看黏著度和追蹤變化;有主題�
 
 
 # --- synthesize_strategy:裁判只選,不改寫;每一步都存 ---
+_REAL_COMPLETE = d._complete
+
 def fake(replies):
     calls = []
-    def _c(model, prompt, timeout=90):
+    def _c(model, prompt, timeout=90, **log):
         calls.append((model, prompt))
         return replies.get(model)
     d._complete = _c
@@ -125,6 +127,26 @@ s = d.synthesize_strategy("P", "bluesky", mk(False), post_id="draft-2", checkpoi
 assert s.hypothesis["picked"] == "A" and "no readable pick" in s.hypothesis["pick_reason"]
 assert reasoning.load(s.reasoning_id)["outcome"] == "judge_unusable"
 print("9. 裁判沒給可讀的選擇 -> 用 A,並明確記成 judge_unusable ✅")
+
+# 2026-10-29 實際發生:qwen3 跑了約 180 秒後沒回(raw None),之前也記成 judge_unusable
+fake({d._MODEL_A: REAL["llama_question"], d._MODEL_B: REAL["mistral_shares"]})
+s = d.synthesize_strategy("P", "bluesky", mk(False), post_id="draft-2b", checkpoint="24h")
+assert s.hypothesis["picked"] == "A" and "did not respond" in s.hypothesis["pick_reason"]
+assert reasoning.load(s.reasoning_id)["outcome"] == "judge_no_response"
+v = hyp.review_view(s.hypothesis, reasoning.load(s.reasoning_id))
+assert "did not respond" in v["picked"]          # 兩個審核介面都從 review_view 讀
+print("9b. 裁判根本沒回 -> judge_no_response,和讀不出來分開 ✅")
+
+_post = d.requests.post
+def _timeout(*a, **kw): raise d.requests.ReadTimeout("read timed out (read timeout=180)")
+d.requests.post = _timeout
+events.clear()
+assert _REAL_COMPLETE(d._JUDGE_MODEL, "p", timeout=180, post_id="draft-2b") is None
+d.requests.post = _post
+err = [kw for st, ev, kw in events if (st, ev) == ("discuss", "model_error")]
+assert err and err[0]["error"].startswith("ReadTimeout") and err[0]["post_id"] == "draft-2b"
+assert err[0]["model"] == d._JUDGE_MODEL and err[0]["timeout"] == 180
+print("9c. 模型呼叫失敗時,原因(逾時/連不上…)記進 audit 的 discuss/model_error ✅")
 
 fake({d._MODEL_A: "Try black cats. It might work.", d._MODEL_B: "Use cat in the hat."})
 s = d.synthesize_strategy("P", "bluesky", mk(False), post_id="draft-3", checkpoint="7d")

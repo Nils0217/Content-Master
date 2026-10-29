@@ -86,7 +86,11 @@ _JUDGE_MODEL = os.environ.get("DISCUSS_JUDGE_MODEL", "qwen3:4b")
 _JUDGE_ENABLED = os.environ.get("DISCUSS_JUDGE_ENABLED", "1") == "1"
 
 
-def _complete(model: str, prompt: str, timeout: int = 90) -> str | None:
+def _complete(model: str, prompt: str, timeout: int = 90, **log: Any) -> str | None:
+    """None when the call failed. Why it failed goes to the audit log as
+    discuss/model_error: 2026-10-29 the judge returned nothing ~180s into a
+    run and every failure — timeout, refused connection, bad reply — looked
+    the same, so the cause could only be guessed from timestamps."""
     try:
         resp = requests.post(
             _ENDPOINT,
@@ -95,7 +99,9 @@ def _complete(model: str, prompt: str, timeout: int = 90) -> str | None:
         )
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"].strip()
-    except (requests.RequestException, KeyError, IndexError, json.JSONDecodeError):
+    except (requests.RequestException, KeyError, IndexError, json.JSONDecodeError) as e:
+        audit.log_event("discuss", "model_error", model=model, timeout=timeout,
+                        error=f"{type(e).__name__}: {e}"[:300], **log)
         return None
 
 
@@ -267,7 +273,7 @@ def synthesize_strategy(
     steps: list[dict[str, Any]] = []
     raw: dict[str, str | None] = {}
     for role, model in (("A", _MODEL_A), ("B", _MODEL_B)):
-        raw[role] = _complete(model, prompt)
+        raw[role] = _complete(model, prompt, **log)
         audit.log_event("discuss", "proposal", model=model, role=role, proposal=raw[role], **log)
         steps.append({"step": "advisor", "role": role, "model": model, "prompt": prompt,
                       "raw": raw[role]})
@@ -327,7 +333,7 @@ def _hypothesis(product_name: str, channel: str, raw: dict[str, str | None],
             "not rewrite them. Answer with exactly these two lines and nothing else:\n"
             "PICK: A or B\nREASON: one sentence"
         )
-        judge_raw = _complete(_JUDGE_MODEL, judge_prompt, timeout=180)
+        judge_raw = _complete(_JUDGE_MODEL, judge_prompt, timeout=180, **log)
         cleaned = _clean_synthesis(judge_raw)
         pick, reason = hyp.parse_pick(cleaned)
         steps.append({"step": "judge", "role": "judge", "model": _JUDGE_MODEL,
@@ -340,10 +346,17 @@ def _hypothesis(product_name: str, channel: str, raw: dict[str, str | None],
             outcome = "picked"
         else:
             # Recorded as exactly that, so it is visible, and A is used
-            # rather than nothing — a test is still better than none.
-            chosen = {**parsed["A"], "picked": "A",
-                      "pick_reason": "the judge gave no readable pick — Advisor A used by default"}
-            outcome = "judge_unusable"
+            # rather than nothing — a test is still better than none. No
+            # reply and an unreadable reply are told apart: the first is the
+            # call (see discuss/model_error), the second is the parser.
+            if judge_raw is None:
+                why = f"the judge ({_JUDGE_MODEL}) did not respond — Advisor A used by default"
+                outcome = "judge_no_response"
+            else:
+                why = "the judge gave no readable pick — Advisor A used by default"
+                outcome = "judge_unusable"
+            print(f"[note] {why[0].upper() + why[1:]}.")
+            chosen = {**parsed["A"], "picked": "A", "pick_reason": why}
 
     chosen["id"] = hyp.new_id()
     return chosen, hyp.render(chosen), outcome
@@ -382,7 +395,7 @@ def _evidence_strategy(product_name: str, channel: str, analysis: AnalysisResult
         "the final strategy must be a content theme, angle, or wording change, never a rename "
         "or rebrand. No preamble."
     )
-    judge_raw = _complete(_JUDGE_MODEL, judge_prompt)
+    judge_raw = _complete(_JUDGE_MODEL, judge_prompt, **log)
     synthesis = _clean_synthesis(judge_raw)
     steps.append({"step": "judge", "role": "judge", "model": _JUDGE_MODEL, "prompt": judge_prompt,
                   "raw": judge_raw, "parsed": synthesis})
