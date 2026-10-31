@@ -20,6 +20,8 @@ plays/_posts.jsonl
 plays/_clusters.jsonl
 plays/_account.jsonl
 plays/_error_proposals.jsonl
+plays/_asset_usage.jsonl
+plays/_platform_rules.jsonl
 plays/.publish.lock
 plays/.review.lock
 metrics/*.jsonl
