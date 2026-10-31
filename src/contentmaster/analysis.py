@@ -17,9 +17,11 @@ step; discuss.py is the multi-model half.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
+from . import warehouse
 from .config import settings
 from .human_loop import ReviewInterrupted
 
@@ -107,7 +109,8 @@ def _query_history(product_name: str, channel: str, checkpoint: str) -> list[dic
     checkpoint tier — a 24h reading only gets compared against other 24h
     readings, never against 7d/30d ones (see CHECKPOINT_QUESTIONS above).
     Returns None if the warehouse hasn't been built yet, so the caller can
-    fall back cleanly instead of crashing the pipeline on a missing file.
+    fall back cleanly instead of crashing the pipeline on a missing file. A
+    file that exists and cannot be read raises warehouse.WarehouseFailed.
 
     The four raw counts are selected so the caller can derive
     `engagement_events` the same way scoring.judge() does (2026-09-27):
@@ -151,8 +154,10 @@ def _query_history(product_name: str, channel: str, checkpoint: str) -> list[dic
              )}
             for r in rows
         ]
-    except Exception:  # noqa: BLE001 — analysis degrading gracefully beats crashing the pipeline
-        return None
+    except Exception as exc:  # noqa: BLE001
+        # 2026-10-30: this returned None, which reads as "not built yet" and
+        # analysed the post with no history at all.
+        raise warehouse.failed(f"could not read post history: {exc}") from exc
 
 
 def _query_external_signal(history: list[dict[str, Any]]) -> str:
@@ -330,11 +335,28 @@ def _judge_prior_suggestion(suggestion: str, followed: str, current_score: float
     return "looks_effective" if current_score > last_score else "looks_ineffective"
 
 
+def _acted_on(suggestion: str, evidence: str, hypothesis_test: str) -> str:
+    """What about THIS post shows it took up `suggestion`, or "" if nothing
+    does. 2026-10-30 (code review): the check read the previous post's
+    evidence, so advice was graded on a post that may never have tried it.
+    Any non-empty evidence is not enough either: the drafting model usually
+    names a topic there, which says nothing about the advice."""
+    def words(text: str) -> set[str]:
+        return set(re.findall(r"[a-z]{4,}", text.lower()))
+
+    if hypothesis_test and hypothesis_test.lower() in suggestion.lower():
+        return hypothesis_test
+    shared, named = words(evidence) & words(suggestion), words(evidence)
+    return evidence if len(shared) >= 2 and len(shared) * 2 >= len(named) else ""
+
+
 def analyze_performance(
     product_name: str,
     channel: str,
     current_score: float,
     checkpoint: str = "24h",
+    current_evidence: str = "",
+    current_hypothesis: str = "",
 ) -> AnalysisResult:
     """Cross-validates this run's result against this product/channel's
     real history in the warehouse — not a single model guessing from one
@@ -397,7 +419,7 @@ def analyze_performance(
         prior_suggestion = last.get("improvement_note") or ""
         last_score = last["engagement_score"] or 0.0
         effectiveness = _judge_prior_suggestion(
-            prior_suggestion, followed=last.get("evidence_used") or "",
+            prior_suggestion, followed=_acted_on(prior_suggestion, current_evidence, current_hypothesis),
             current_score=current_score, last_score=last_score, has_baseline=has_baseline,
         )
 

@@ -21,6 +21,12 @@ the project grows (keep the actual logic in the relevant module, cli.py
 stays thin). The old `run_pipeline.py` / `scripts/verify_bluesky.py`
 entry points still work — they just forward to the same CLI now.
 
+## Activate venv
+```
+source .venv/bin/activate
+```
+
+
 ## Run it
 
 ```bash
@@ -53,6 +59,8 @@ for the next step instead.
 ```bash
 contentmaster review                 # checks the 24h checkpoint (default)
 contentmaster review --checkpoint 7d # or 7d / 30d
+contentmaster review --schedule      # the Mac analyses what is due daily at 18:30 (or --schedule HH:MM); you still confirm
+contentmaster review --unschedule    # turn that off
 contentmaster refresh                # re-read engagement for every live post under 30 days
 contentmaster status                 # what needs a human right now
 ```
@@ -73,10 +81,11 @@ pending.
 Run this once real time has passed. It finds posts due for that
 checkpoint, pulls their *real* metrics for the first time, then
 `analysis.py` cross-validates against this product/channel's history *at
-that same checkpoint tier* in the warehouse (`dbt run` in `warehouse/`
-first — see below), and `discuss.py` has two different local models each
-propose a next-round strategy (a third-model judge exists but is off by
-default, see `discuss.py`'s `_JUDGE_ENABLED`).
+that same checkpoint tier* in the warehouse (rebuilt automatically just
+before each analysis; if that fails, the review stops and says why rather
+than comparing against old history), and `discuss.py` has two different local models each
+propose a next-round strategy, and a third model picks one (turn that off
+with `DISCUSS_JUDGE_ENABLED=0`, see `discuss.py`).
 
 By default this then opens the same browser review page as `contentmaster
 run` (Streamlit, see `streamlit_app.py`), this time on its "Analysis
@@ -118,6 +127,9 @@ contentmaster schedule --time 18:00  # same as the review page's Schedule tab
 contentmaster publish-due            # what the Mac runs at posting time (launchd)
 contentmaster clusters               # every cluster and its posts
 contentmaster status                 # what waits on you; scheduled and overdue posts
+contentmaster images --source auto   # or generate / supplied: where images come from on the next run
+contentmaster errors                 # every recorded error; --propose N asks a local model for a fix
+contentmaster rules                  # what is verified about a platform; --add needs --platform and --evidence
 ```
 
 - Approving a cluster post does **not** publish it; the publish guard runs

@@ -42,7 +42,8 @@ from contentmaster.pipeline import apply_analysis_decision, step5_publish, step6
 from contentmaster.pipeline import LABEL_KEYS, PublishFailed, StaleAnalysis
 from contentmaster.pipeline import (NotSchedulable, approve_for_schedule, is_scheduled_kind,
                                     record_rejected)
-from contentmaster import arm_check, clusters, image_review
+from contentmaster import arm_check, clusters, error_index, image_review, platform_rules
+from contentmaster import product_assets, product_registry
 from contentmaster import hypothesis as hyp, reasoning
 from contentmaster.publish_guard import publish_blockers
 from contentmaster.platforms.registry import get_platform
@@ -195,10 +196,83 @@ def _show_length(channel: str, text: str) -> None:
         st.caption(f"{n} / {cap} characters")
 
 
-tab_drafts, tab_analysis, tab_schedule = st.tabs(["Draft review", "Analysis review", "Schedule"])
+tab_drafts, tab_analysis, tab_schedule, tab_errors = st.tabs(
+    ["Draft review", "Analysis review", "Schedule", "Errors & rules"])
+
+# Above the other tabs in this file because they can st.stop() the script.
+# Same list and numbering as `contentmaster errors` and `contentmaster rules`.
+with tab_errors:
+    rows = error_index.report()
+    if not rows:
+        st.info("No errors recorded.")
+    for i, r in enumerate(rows, start=1):
+        with st.expander(f"{i}. {r['count']}x  {r['signature']}"):
+            st.caption(f"First {r['first_seen'][:16]}, last {r['last_seen'][:16]}")
+            for occurrence in r["occurrences"]:
+                st.json(occurrence, expanded=False)
+            for heading, body in r["known"]:
+                st.markdown(f"**Past write-up: {heading}**")
+                st.caption(body[:600])
+            proposal = r["proposal"]
+            if proposal:
+                st.markdown(f"**Proposed fix** ({proposal['model']}, {proposal['status']})")
+                st.write(proposal["raw"])
+            if st.button("Ask a local model for a fix", key=f"propose_{i}",
+                         help="Uses Ollama and can take a few minutes. Nothing is applied."):
+                with st.spinner("Waiting for the model…"):
+                    if error_index.propose_fix(r["signature"]) is None:
+                        st.error("The model did not answer. Why is in the audit log (model_error).")
+                        st.stop()
+                st.rerun()
+            if proposal and proposal["status"] == "pending":
+                note = st.text_input("Your note (optional)", key=f"proposal_note_{i}")
+                col_yes, col_no = st.columns(2)
+                if col_yes.button("Accept", key=f"accept_{i}", help="Records that this fix should be made."):
+                    error_index.decide_proposal(r["signature"], True, note)
+                    st.rerun()
+                if col_no.button("Reject", key=f"reject_{i}"):
+                    error_index.decide_proposal(r["signature"], False, note)
+                    st.rerun()
+
+    st.subheader("Platform rules")
+    st.caption("True for every product on a platform, and given to the models that write and advise. "
+               "Only people add these: a fact about one product filed here would affect all of them.")
+    for rule in platform_rules.active():
+        st.write(f"**{rule['platform']}**: {rule['rule']}")
+        st.caption(f"Evidence: {rule['evidence']}")
+        if st.button("Retire", key=f"retire_{rule['id']}"):
+            platform_rules.retire(rule["id"])
+            st.rerun()
+    with st.form("add_platform_rule", clear_on_submit=True):
+        rule_platform = st.text_input("Platform", value="bluesky")
+        rule_text = st.text_input("Rule")
+        rule_evidence = st.text_input("Evidence that this holds for the platform, not one product")
+        if st.form_submit_button("Add rule"):
+            try:
+                platform_rules.add(rule_platform, rule_text, rule_evidence)
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
 
 with tab_drafts:
-    pending = draft_queue.find_pending()
+    # Set before a run: images are made before any draft reaches this page.
+    with st.expander("Images for the next run"):
+        image_products = sorted(product_registry.known_names(), reverse=True,
+                                key=lambda n: product_registry.lookup(n).get("last_used", ""))
+        if image_products:
+            image_product = st.selectbox("Product", image_products, key="image_source_product")
+            sources = list(product_assets.IMAGE_SOURCES)
+            current_source = product_assets.image_source(image_product)
+            chosen_source = st.radio("Where images come from", sources, index=sources.index(current_source),
+                                     format_func=product_assets.IMAGE_SOURCES.get,
+                                     key=f"image_source_{image_product}")
+            if chosen_source != current_source:
+                product_assets.set_image_source(image_product, chosen_source)
+            st.caption(f"Your files for this product: {product_assets.describe(image_product)['count']}.")
+        else:
+            st.caption("No product yet. Run `contentmaster run` first.")
+
+    pending = draft_queue.find_reviewable()
 
     if not pending:
         st.info("Nothing waiting for review right now. Run `contentmaster run` to queue a draft.")
@@ -212,6 +286,13 @@ with tab_drafts:
             st.session_state[text_key] = entry["text"]
 
         st.subheader(f"{entry['product']} on {entry['channel']}, topic: {entry.get('topic') or 'none'}")
+        if entry.get("status") == "publish_failed":
+            failure_reason = entry.get("failure_reason")
+            st.error(f"The last attempt failed ({entry.get('failure_kind')}): {failure_reason}\n\n"
+                     "Edit it if needed and approve again, or reject it.")
+        if entry.get("send_uncertain"):
+            st.warning("The connection failed while this was sending, so it may already be live. "
+                       "Approving checks the account first and will not post it twice.")
 
         # 2026-09-19 (code scan): a draft produced by the fixed template
         # (no topic index AND no usable context — see
@@ -254,6 +335,11 @@ with tab_drafts:
             except Exception as e:  # noqa: BLE001 — any decode failure, same answer
                 st.warning(f"The image for this draft could not be opened ({e}). "
                            "Approving will publish the text without it.")
+        elif entry.get("video_path") or entry.get("image_path"):
+            st.warning("The file saved for this draft is missing: "
+                       f"{entry.get('video_path') or entry['image_path']}. Reject it and generate it "
+                       "again — a scheduled post cannot be approved without it, and any other post "
+                       "would go out as text only.")
         else:
             st.caption("No image for this draft (Cloudflare not configured, or the call failed).")
 
@@ -312,6 +398,7 @@ with tab_drafts:
                     # rewrite from feedback typed into the wrong box.
                     original_text=entry.get("original_text") or entry["text"],
                     acknowledged=bool(st.session_state.get(f"ack_short_{draft_id}")),
+                    check_first=bool(entry.get("send_uncertain")),
                 )
             except PublishFailed as e:
                 # Nothing was sent, and the page must not say otherwise —
@@ -321,6 +408,8 @@ with tab_drafts:
                 draft_queue.update_entry(
                     draft_id, status="publish_failed",
                     failure_kind=e.failure.kind, failure_reason=e.failure.reason,
+                    send_uncertain=e.failure.uncertain or (bool(entry.get("send_uncertain"))
+                                                           and e.failure.retry_unchanged),
                 )
                 if e.failure.retry_unchanged:
                     st.info("The post itself is fine. Leave it queued and approve it again once "
@@ -347,7 +436,8 @@ with tab_drafts:
                 # this file kept its own copy until 2026-10-04.
                 labels={k: entry.get(k) for k in LABEL_KEYS if entry.get(k) is not None},
             )
-            draft_queue.update_entry(draft_id, status="published", text=st.session_state[text_key])
+            draft_queue.update_entry(draft_id, status="published", text=st.session_state[text_key],
+                                     send_uncertain=False)
             st.success(f"Published. {published.get('status')}")
             st.rerun()
 
@@ -558,6 +648,20 @@ with tab_schedule:
     from datetime import date as _date
 
     from contentmaster import posts as _posts, scheduler
+
+    # 2026-10-30: same functions as `contentmaster review --schedule`.
+    with st.expander("Automatic review"):
+        review_at = scheduler.review_schedule()
+        st.caption((f"On: daily at {review_at}" if review_at else "Off")
+                   + f". Analyses up to {scheduler.REVIEW_WAKE_LIMIT} due posts and notifies you; "
+                   "you still confirm each one on the Analysis review tab.")
+        review_time = st.selectbox("Time of day", scheduler.TIME_CHOICES, key="review_time",
+                                   index=scheduler.TIME_CHOICES.index(review_at or scheduler.REVIEW_DEFAULT_TIME))
+        col_on, col_off = st.columns(2)
+        if col_on.button("Review daily at this time"):
+            st.caption(f"Mac: {scheduler.schedule_review(review_time)}")
+        if review_at and col_off.button("Turn automatic review off"):
+            st.caption(f"Mac: {scheduler.unschedule_review()}")
 
     live_clusters = sorted((c for c in clusters.all_clusters().values() if c["cluster_id"] > 0),
                            key=lambda c: (c["product"], c["cluster_id"]))

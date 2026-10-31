@@ -20,7 +20,7 @@ from typing import Any
 
 import requests
 
-from . import audit
+from . import audit, platform_rules
 from .config import settings
 
 from .scoring import score_of as _score_of
@@ -668,6 +668,7 @@ class DraftGenerator:
         hypothesis = (prior or {}).get("hypothesis")
         prompt += _hypothesis_instruction(hypothesis, require_field=not cluster_arm,
                                           cluster_arm=cluster_arm)
+        prompt += platform_rules.prompt_block(channel)
         prompt += "VOCABULARY. " + draft_labels.describe_for_prompt() + "\n\n"
         prompt += _target_instruction(target)
         prompt += (
@@ -877,6 +878,7 @@ class DraftGenerator:
             f"Here is what we know about a product called '{name}', extracted from its "
             f"source document:\n\n{context.strip()[:3000]}\n\n"
         )
+        prompt += platform_rules.prompt_block(channel)
         if prior:
             m = prior.get("last_metrics", {})
             prompt += (

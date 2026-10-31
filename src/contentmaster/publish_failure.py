@@ -35,6 +35,7 @@ from .platforms.base import (
     PlatformAuthError,
     PlatformConfigError,
     PlatformContentRejected,
+    PlatformNetworkError,
     PlatformRateLimitError,
 )
 from .publish_guard import DraftNotPublishable
@@ -49,6 +50,8 @@ class PublishFailure:
     kind: str
     error_type: str
     reason: str
+    # The connection failed mid-send, so the post may already be live.
+    uncertain: bool = False
 
     @property
     def retry_unchanged(self) -> bool:
@@ -63,6 +66,9 @@ class PublishFailure:
         if self.kind == CONTENT:
             return (f"The post itself was rejected ({self.reason}). Sending the same text again "
                     "will fail the same way — it needs a revision and your approval.")
+        if self.uncertain:
+            return (f"The connection failed while sending ({self.reason}), so this post may already "
+                    "be live. Sending it again checks the account first and will not post it twice.")
         if self.kind == ENVIRONMENT:
             return (f"The platform could not be reached or refused the request ({self.reason}). "
                     "Nothing is wrong with the post; it is unchanged and can be sent again once "
@@ -82,12 +88,14 @@ def classify(error: Exception) -> PublishFailure:
     error_type, reason = type(error).__name__, str(error)
     if isinstance(error, (DraftNotPublishable, PlatformContentRejected)):
         return PublishFailure(CONTENT, error_type, reason)
+    if isinstance(error, PlatformNetworkError):
+        return PublishFailure(ENVIRONMENT, error_type, reason, uncertain=error.may_have_sent)
     if isinstance(error, (PlatformRateLimitError, PlatformAuthError, PlatformConfigError)):
         return PublishFailure(ENVIRONMENT, error_type, reason)
     if isinstance(error, PlatformAPIError):
-        # A plain PlatformAPIError covers both "the platform said no to
-        # this post" and "the network died". The adapter knows which; we
-        # do not, so this is deliberately the TECHNICAL bucket rather than
-        # a guess dressed up as a classification.
+        # The adapter raises PlatformNetworkError when the network died. A
+        # plain PlatformAPIError is the platform answering in a way we do not
+        # recognise, so this is deliberately the TECHNICAL bucket rather
+        # than a guess dressed up as a classification.
         return PublishFailure(TECHNICAL, error_type, reason)
     return PublishFailure(TECHNICAL, error_type, reason)

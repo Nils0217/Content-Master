@@ -43,9 +43,35 @@ from .slug import slugify
 
 ASSETS_DIR = settings.data_root / "product_assets"
 USAGE_PATH = settings.data_root / "plays" / "_asset_usage.jsonl"
+SOURCE_PATH = settings.data_root / "plays" / "_image_source.json"
+
+# 2026-10-30 (docs/SCHEDULE.md Phase 11): "auto" is the rule above; the other
+# two say "generate this time even though I have files", or the reverse.
+IMAGE_SOURCES = {"auto": "Automatic: my files if there are any, otherwise generate",
+                 "generate": "Always generate",
+                 "supplied": "Only my files, never generate"}
 
 # What Bluesky accepts and PIL-free reading can pass straight through.
 SUPPORTED_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+
+
+def _sources() -> dict[str, str]:
+    return json.loads(SOURCE_PATH.read_text()) if SOURCE_PATH.exists() else {}
+
+
+def image_source(product_name: str) -> str:
+    return _sources().get(product_name, "auto")
+
+
+def set_image_source(product_name: str, source: str) -> None:
+    if source not in IMAGE_SOURCES:
+        raise ValueError(f"Unknown image source {source!r}; expected one of {', '.join(IMAGE_SOURCES)}.")
+    SOURCE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SOURCE_PATH.write_text(json.dumps({**_sources(), product_name: source}, indent=2) + "\n")
+
+
+def may_generate(product_name: str) -> bool:
+    return image_source(product_name) != "supplied"
 
 
 def product_dir(product_name: str) -> Path:
@@ -91,6 +117,8 @@ def next_image(product_name: str) -> tuple[bytes, Path] | None:
     selection works that way: it is reproducible, and it stops one image
     appearing on post after post while others are never used at all.
     """
+    if image_source(product_name) == "generate":
+        return None
     candidates = available(product_name)
     if not candidates:
         return None
@@ -99,7 +127,7 @@ def next_image(product_name: str) -> tuple[bytes, Path] | None:
     try:
         data = chosen.read_bytes()
     except OSError as e:
-        print(f"[warn] Could not read {chosen} ({e}); falling back to a generated image.")
+        print(f"[warn] Could not read {chosen} ({e}); not using it.")
         return None
     _record_use(chosen, product_name)
     return data, chosen

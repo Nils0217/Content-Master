@@ -11,10 +11,11 @@ for f in tests/test_*.py; do
     count=$((count+1))
     name=$(basename "$f" .py)
     out=$(./.venv/bin/python "$f" "$SCRATCH/$name" 2>&1)
-    if printf '%s' "$out" | tail -1 | grep -q "all passed"; then
+    status=$?
+    if [ "$status" -eq 0 ] && printf '%s' "$out" | tail -1 | grep -q "all passed"; then
         printf '  %-34s ok\n' "$name"
     else
-        printf '  %-34s FAILED\n' "$name"
+        printf '  %-34s FAILED (exit %s)\n' "$name" "$status"
         printf '%s\n' "$out" | tail -12 | sed 's/^/      /'
         fail=1
     fi

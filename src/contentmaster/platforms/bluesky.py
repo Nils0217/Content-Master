@@ -29,6 +29,7 @@ from .base import (
     PlatformRateLimitError,
     PlatformConstraints,
     PlatformContentRejected,
+    PlatformNetworkError,
     Post,
     PostNotFoundError,
 )
@@ -86,7 +87,7 @@ class BlueskyPlatform(Platform):
         except RateLimitExceededError as e:
             raise PlatformRateLimitError("Bluesky rate limit hit while logging in. Wait and retry.") from e
         except NetworkError as e:
-            raise PlatformAPIError(f"Network error reaching Bluesky: {e}") from e
+            raise PlatformNetworkError(f"Network error reaching Bluesky: {e}", may_have_sent=False) from e
         except AtProtocolError as e:
             raise PlatformAPIError(f"Bluesky API error during login: {e}") from e
         self._client = client
@@ -199,10 +200,26 @@ class BlueskyPlatform(Platform):
         except RateLimitExceededError as e:
             raise PlatformRateLimitError("Bluesky rate limit hit while posting. Wait and retry.") from e
         except NetworkError as e:
-            raise PlatformAPIError(f"Network error reaching Bluesky: {e}") from e
+            raise PlatformNetworkError(f"Network error reaching Bluesky: {e}") from e
         except AtProtocolError as e:
             raise PlatformAPIError(f"Bluesky API error while posting: {e}") from e
         return {"uri": result.uri, "cid": result.cid}
+
+    def find_published(self, text: str) -> dict[str, Any] | None:
+        client = self._get_client()
+        try:
+            feed = client.get_author_feed(actor=client.me.did, limit=50).feed
+        except RateLimitExceededError as e:
+            raise PlatformRateLimitError("Bluesky rate limit hit while checking recent posts.") from e
+        except NetworkError as e:
+            raise PlatformNetworkError(f"Network error checking recent posts: {e}", may_have_sent=False) from e
+        except AtProtocolError as e:
+            raise PlatformAPIError(f"Bluesky API error checking recent posts: {e}") from e
+        for item in feed:
+            # `reason` marks a repost, which is someone else's post on this feed.
+            if not getattr(item, "reason", None) and item.post.record.text == text:
+                return {"uri": item.post.uri, "cid": item.post.cid}
+        return None
 
     # app.bsky.feed.getPosts caps at 25 URIs per call.
     _GET_POSTS_MAX_URIS = 25
@@ -248,7 +265,7 @@ class BlueskyPlatform(Platform):
         except RateLimitExceededError as e:
             raise PlatformRateLimitError("Bluesky rate limit hit while posting video.") from e
         except NetworkError as e:
-            raise PlatformAPIError(f"Network error reaching Bluesky: {e}") from e
+            raise PlatformNetworkError(f"Network error reaching Bluesky: {e}") from e
         except AtProtocolError as e:
             # Covers the two limits this adapter cannot check in advance:
             # an unverified account email, and the 25-video/10GB daily cap.

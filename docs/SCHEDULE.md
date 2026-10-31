@@ -915,30 +915,25 @@ the whitepaper hash. The manual profile work is unchanged.
 - [ ] Final confirmation of gate 1's 8 / 10 — deliberately left provisional
       until era 1 produces real data to calibrate against
 
-## Phase 11 — scheduled, not built
+## Phase 11 — built 2026-10-30
 
-Decided 2026-09-22 (/grill-me), deliberately left for later.
+Decided 2026-09-22 (/grill-me), built 2026-10-30. Tested with stand-ins for
+the models: no proposal or rule has been through a real model yet.
 
-- [ ] **Generate-image toggle in the review UI.** On: the pipeline
-      generates an image with FLUX. Off: it uses whatever the user put in
-      `product_assets/<product>/` and never calls the image model. Today
-      the rule is automatic — supplied files win when they exist,
-      generation happens when the folder is empty (product_assets.py) —
-      which covers the common case but gives no way to say "I have assets
-      but I want a generated one this time", or the reverse.
-- [ ] **Full error index: retrieval, not just counting.** `error_index.py`
-      currently answers "which errors keep happening" so they can be
-      prevented. The scheduled half is feeding a past error's recorded
-      analysis back to the LLM as context so it can propose a fix, which
-      then goes through normal human review. **Required for era 1.**
-- [ ] **Platform-level learned rules.** Findings verified about a platform
-      rather than a product ("posts with links reach fewer people here")
-      currently hang on the product, so every product rediscovers them.
-      Deliberate: a product-level fact misfiled as a platform fact would
-      poison every other product, and with one product the duplication
-      costs nothing yet.
-- [ ] **Error index for humans.** The counter is built for the pipeline;
-      a view aimed at whoever is debugging is a separate shape.
+- [x] **Generate-image toggle.** Review page ("Images for the next run" on the
+      Draft review tab) and `contentmaster images --source`. Automatic (the
+      old rule, still the default), always generate, or only my files, which
+      never calls the image model. Per product (product_assets.py).
+- [x] **Full error index: retrieval.** `error_index.propose_fix()` gives a
+      local model the error's recent occurrences and any past write-up in
+      docs/ERROR_LOG.md whose heading shares two words with it. A human accepts
+      or rejects the answer (plays/_error_proposals.jsonl). Accepting records
+      a decision; nothing is applied.
+- [x] **Platform-level learned rules.** platform_rules.py. Added by a human
+      with evidence, never by a model; given to the draft writers and advisors.
+      With no rule on a platform, every prompt is unchanged.
+- [x] **Error index for humans.** `contentmaster errors` and the review page's
+      Errors & rules tab, same list and numbering.
 - [x] ~~**Automatic Google Trends refresh.**~~ Superseded 2026-10-21: trends
       are switched off (`TRENDS_ENABLED=0`) because the stale seed kept
       steering hypotheses. Revisit only with a live source. Original note:
@@ -965,8 +960,39 @@ Designed with the user; reasons in `docs/HANDOFF.md` §4.
 - [ ] Prompts moved to `prompts/` (byte-identical, checked by snapshot).
 - [ ] Every model call recorded in `plays/_model_calls.jsonl`; `cluster_id`
       on every table so all of them join.
+- [x] Scheduled review (2026-10-30): `contentmaster review --schedule [HH:MM]`,
+      default 18:30, up to three posts a wake, newest tier first. Analyses
+      wait for a human and a notification says so; nothing is confirmed.
+- [x] History stays current (2026-10-30): `warehouse.refresh()` runs `dbt run`
+      before every analysis, on the one path manual and scheduled review share.
+      Nothing ran it before, so analyses compared against 4 rows from September
+      while the ledgers held 26. A failed update, or a database that exists and
+      cannot be read, stops the analysis and says so; the posts stay due.
 - [ ] Withdraw a single already-scheduled post (offered, not built).
 - [ ] Catch title-only drafts (`publish_guard` does not).
+
+## Threads (added 2026-10-30, not started)
+
+Publish to and measure from Threads as a second platform. Nothing is built;
+Bluesky is still the only adapter.
+
+Human first, code after:
+- [ ] Create the Meta app with "Access the Threads API", permissions
+      `threads_basic`, `threads_content_publish`, `threads_manage_insights`.
+- [ ] Add the account as Threads Tester and accept it in Threads settings. Use a
+      public profile: a private one's grant cannot be extended past 90 days.
+- [ ] Get a long-lived token (60 days). Credentials go in `.env` only.
+
+Build, text first:
+- [ ] `platforms/threads.py` and registry entry: connection test, publish
+      (create a container, wait, publish), read metrics, `find_published`.
+- [ ] Automatic token refresh before the 60 days end, so scheduled posts do not
+      start failing unattended.
+- [ ] 500-character limit in `platform_rules`; emoji count by UTF-8 bytes.
+- [ ] Baselines per channel. Threads has no bookmark count, so its scores are
+      not comparable with Bluesky's.
+- [ ] Images, after choosing a public host: Threads downloads each image from a
+      public URL, and ours exist only on this Mac.
 
 ## Notes — considered, not accepted (revisit only with new info)
 

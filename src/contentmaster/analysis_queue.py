@@ -44,7 +44,8 @@ from .config import settings
 # hypothesis read on stickiness + follower change (no chosen WATCH), and
 # the post's image described by Gemma. Version-3 entries proposed tests
 # from stale trends and named their own metric.
-ANALYSIS_SCHEMA = 4
+# 5 (2026-10-30): advice graded on this post, checkpoint-matched stickiness, same-week controls.
+ANALYSIS_SCHEMA = 5
 
 # Shown by both review surfaces and raised by the decision path, so the
 # three say the same thing. See .claude/skills/two-review-surfaces.

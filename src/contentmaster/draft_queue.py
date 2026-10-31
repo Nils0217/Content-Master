@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from .config import settings
@@ -66,6 +67,19 @@ def queue_draft(
         fh.write(json.dumps(record, default=str) + "\n")
 
 
+def _rebased(stored: str) -> str:
+    """The path of a saved image or video, wherever the project lives now.
+
+    2026-10-30: this file keeps absolute paths, and the project moved out of
+    ~/Desktop on 2026-10-27. Every saved path then pointed at nothing, so
+    posts #13-15 went out as text with their approved images sitting in
+    generated_images/.
+    """
+    path = Path(stored)
+    moved = settings.data_root / path.parent.name / path.name
+    return str(moved) if not path.exists() and moved.exists() else stored
+
+
 def _latest_entries() -> dict[str, dict[str, Any]]:
     if not QUEUE_PATH.exists():
         return {}
@@ -79,6 +93,10 @@ def _latest_entries() -> dict[str, dict[str, Any]]:
             draft_id = record.get("draft_id")
             if draft_id:
                 latest[draft_id] = record
+    for record in latest.values():
+        for key in ("image_path", "video_path"):
+            if record.get(key):
+                record[key] = _rebased(record[key])
     return latest
 
 
@@ -89,6 +107,14 @@ def find_pending() -> list[dict[str, Any]]:
     entries = list(_latest_entries().values())
     entries.sort(key=lambda r: r.get("ts", ""))
     return [r for r in entries if r.get("status") == "pending"]
+
+
+def find_reviewable() -> list[dict[str, Any]]:
+    """What the review page lists: everything pending, plus drafts whose
+    publish failed. 2026-10-30 (code review): the page told people to edit or
+    approve a failed draft again, then dropped it on the next click."""
+    entries = sorted(_latest_entries().values(), key=lambda r: r.get("ts", ""))
+    return [r for r in entries if r.get("status") in ("pending", "publish_failed")]
 
 
 def update_entry(draft_id: str, **fields: Any) -> dict[str, Any] | None:

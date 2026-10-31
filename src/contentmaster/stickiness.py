@@ -51,12 +51,19 @@ def _snapshots(channel: str) -> list[dict[str, Any]]:
     return sorted((r for r in rows if r.get("channel") == channel), key=lambda r: r["ts"])
 
 
+def _moment(iso: str) -> datetime:
+    """A comparable moment. Timestamps here mix UTC and local offsets, and
+    comparing them as strings compares neither."""
+    return datetime.fromisoformat(iso).astimezone()
+
+
 def follower_change(channel: str, start_iso: str, end_iso: str) -> dict[str, Any]:
-    """Net followers gained between two moments, from the snapshots nearest
-    inside the window. {"change", "from", "to", "from_ts", "to_ts"}, with
+    """Net followers gained from `start_iso` up to but not including
+    `end_iso`, from the snapshots nearest inside the window. {"change", "from", "to", "from_ts", "to_ts"}, with
     change None when fewer than two snapshots fall inside — said, not
     guessed."""
-    inside = [r for r in _snapshots(channel) if start_iso <= r["ts"] <= end_iso]
+    start, end = _moment(start_iso), _moment(end_iso)
+    inside = [r for r in _snapshots(channel) if start <= _moment(r["ts"]) < end]
     if len(inside) < 2:
         return {"change": None, "from": None, "to": None, "from_ts": None, "to_ts": None,
                 "snapshots": len(inside)}
@@ -67,36 +74,55 @@ def follower_change(channel: str, start_iso: str, end_iso: str) -> dict[str, Any
 
 # --- stickiness --------------------------------------------------------------
 
-def engagers_of(post_id: str) -> set[str] | None:
-    """Everyone who liked, reposted or replied, from the latest reading that
-    could ask. None when no reading has engager data."""
+def _engager_reading(post_id: str, checkpoint: str | None = None,
+                     as_of: str | None = None) -> dict[str, Any] | None:
+    """The latest reading with engager data, optionally only from one
+    checkpoint and only from before a moment."""
     from . import metrics_store
 
     path = metrics_store.METRICS_PATH
     if not path.exists():
         return None
+    limit = _moment(as_of) if as_of else None
     found = None
     for line in path.read_text().splitlines():
         if post_id not in line:
             continue
         r = json.loads(line)
-        if r.get("post_id") == post_id and isinstance(r.get("engagers"), dict):
-            found = r["engagers"]
-    if found is None:
+        if r.get("post_id") != post_id or not isinstance(r.get("engagers"), dict):
+            continue
+        if checkpoint and r.get("checkpoint") != checkpoint:
+            continue
+        if limit and r.get("recorded_at") and _moment(r["recorded_at"]) > limit:
+            continue
+        found = r
+    return found
+
+
+def engagers_of(post_id: str, checkpoint: str | None = None, as_of: str | None = None) -> set[str] | None:
+    """Everyone who liked, reposted or replied, from the latest matching
+    reading. None when no matching reading has engager data."""
+    reading = _engager_reading(post_id, checkpoint, as_of)
+    if reading is None:
         return None
-    return {a for kind in ENGAGER_KINDS for a in (found.get(kind) or [])}
+    return {a for kind in ENGAGER_KINDS for a in (reading["engagers"].get(kind) or [])}
 
 
-def stickiness(post_id: str, product: str, channel: str) -> dict[str, Any]:
+def stickiness(post_id: str, product: str, channel: str, checkpoint: str | None = None) -> dict[str, Any]:
     """{"value", "engagers", "returning", "known"} for one post.
 
     Earlier = posts in the post table published before this one. A prior
     post with no engager data is skipped and counted in `unknown_prior`, so
     a low value can be read against how much history was missing.
+
+    2026-10-30 (code review): `checkpoint` picks which reading of this post
+    counts, and earlier posts count only as they stood when it was taken, so
+    a result cannot change because another post was refreshed later.
     """
     from . import posts
 
-    mine = engagers_of(post_id)
+    reading = _engager_reading(post_id, checkpoint)
+    mine = engagers_of(post_id, checkpoint)
     if mine is None:
         return {"value": None, "engagers": None, "returning": None, "known": False}
     table = posts.all_posts()
@@ -108,7 +134,7 @@ def stickiness(post_id: str, product: str, channel: str) -> dict[str, Any]:
     prior: set[str] = set()
     unknown = 0
     for r in before:
-        e = engagers_of(r["post_id"])
+        e = engagers_of(r["post_id"], as_of=reading.get("recorded_at"))
         if e is None:
             unknown += 1
         else:

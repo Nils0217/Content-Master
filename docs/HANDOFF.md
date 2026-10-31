@@ -47,7 +47,7 @@
 
 ## 1. 這是什麼
 
-`/Users/liunils/Desktop/Marketing hack` — 本機優先的行銷內容 pipeline。
+`/Users/liunils/Marketing hack` — 本機優先的行銷內容 pipeline。
 來源文件抽主題 → 產草稿 → 人審 → 排程發到 Bluesky → 追成效 → 用成效決定下一輪。
 
 **核心主張**:產生內容免費,難的是「知道它有沒有用」。系統**拒絕宣稱它證明不了的事**。
@@ -84,7 +84,7 @@ Bluesky 帳號 **0 個追蹤者**。
 ## 2. 指令
 
 ```bash
-cd "/Users/liunils/Desktop/Marketing hack" && source .venv/bin/activate
+cd "/Users/liunils/Marketing hack" && source .venv/bin/activate
 
 contentmaster run --cluster          # 填目前這週 cluster 的空日子;沒有在跑的 cluster 才開新的
 contentmaster run                    # 額外貼文(kind=extra),核准即發佈

@@ -6,8 +6,8 @@
     ... real time passes ...
     -> `contentmaster review`: checkpoint (24h/7d/30d) -> pull real metrics
     -> analysis (cross-validated vs. warehouse history, checkpoint-scoped)
-    -> discuss (2 local models propose; a 3rd-model judge exists but is
-    off by default, see discuss.py's _JUDGE_ENABLED) -> [human confirms
+    -> discuss (2 local models propose; a 3rd-model judge picks one, see
+    discuss.py's _JUDGE_ENABLED) -> [human confirms
     or disagrees, in a browser by default, or the terminal with
     --terminal] -> log (Modiqo, success AND failure both feed forward
     now) -> next run's generation reads back the highest-maturity
@@ -79,7 +79,7 @@ from .platforms.base import (
     PostNotFoundError,
 )
 from .platforms.registry import PLATFORMS, get_platform
-from . import arm_check, image_review, product_assets
+from . import arm_check, image_review, product_assets, warehouse
 from .product_registry import describe as describe_product, remember as remember_product
 from .publish_failure import PublishFailure, classify as classify_failure
 from .publish_guard import DraftNotPublishable, publish_blockers
@@ -484,6 +484,8 @@ def step4b_generate_image(draft: dict[str, Any], final_text: str,
         prompt = f"supplied by the user: {source_path.name}"
         audit.log_event("image", "supplied", draft_id=draft["id"], file=source_path.name)
         print(f"[image] Using your own file {source_path.name} instead of generating one.")
+    elif not product_assets.may_generate(product_name):
+        return None, ""
     else:
         prompt = image_generator.build_image_prompt(
             final_text, subject_hint=draft.get("brief", ""), product=product_name,
@@ -519,7 +521,7 @@ def step4b_generate_image(draft: dict[str, Any], final_text: str,
 def step5_publish(
     draft: dict[str, Any], final_text: str, image: bytes | None = None, image_alt: str = "",
     original_text: str | None = None, acknowledged: bool = False,
-    video: bytes | None = None, video_alt: str = "",
+    video: bytes | None = None, video_alt: str = "", check_first: bool = False,
 ) -> dict[str, Any]:
     """Posts for real on any *implemented* platform (see
     platforms/registry.py's PLATFORMS) — gated on the human approval that
@@ -574,7 +576,13 @@ def step5_publish(
     if channel in PLATFORMS:
         try:
             platform = get_platform(channel)
-            if video:
+            # `check_first`: an earlier send may have gone through (2026-10-30).
+            already = platform.find_published(final_text) if check_first else None
+            if already:
+                audit.log_event("publish", "reconciled", draft_id=draft["id"], ref=already.get("uri"))
+                print(f"[publish] Already live from an earlier attempt: {already.get('uri')}. Not sent again.")
+                result = already
+            elif video:
                 # A video post is not a text post that happens to carry a
                 # file — Bluesky's own API separates them — so the adapter
                 # decides, and one that cannot do video says so rather than
@@ -674,6 +682,12 @@ def approve_for_schedule(draft_id: str, final_text: str, image_path: str | None 
     from . import posts
 
     entry = draft_queue._latest_entries().get(draft_id) or {}
+    # Publishing refuses a post whose file is gone (scheduler.publish_due);
+    # say so now, while someone can still do something about it.
+    media = entry.get("video_path") or image_path or entry.get("image_path")
+    if media and not Path(media).exists():
+        raise NotSchedulable([f"its image or video file is missing: {media}. "
+                              "Reject this draft and generate it again."])
     channel = entry.get("channel", "")
     reasons = (get_platform(channel).constraints.violations(final_text)
                if channel in PLATFORMS else [])
@@ -953,21 +967,22 @@ def _pull_and_analyze(entry: dict[str, Any], checkpoint: str) -> tuple[dict[str,
     what happens with the result once a human has actually looked at it.
     """
     product_name, channel = entry["product"], entry["channel"]
+    warehouse.refresh()
     metrics = _pull_checkpoint_metrics(entry, checkpoint)
+    from . import hypothesis as hyp, reasoning
+
+    tested = entry.get("tests_hypothesis_id")
+    tested_hypothesis = reasoning.find_hypothesis(tested) if tested else None
     analysis = analyze_performance(product_name, channel, metrics.get("engagement_score", 0.0),
-                                    checkpoint=checkpoint)
+                                    checkpoint=checkpoint, current_evidence=entry.get("evidence_used") or "",
+                                    current_hypothesis=(tested_hypothesis or {}).get("test", ""))
     # 2026-10-05: if this post was testing a hypothesis, read the number
     # that test said to watch before anything else — the advisors are told
     # the result, and both review surfaces show it.
-    tested = entry.get("tests_hypothesis_id")
     if tested:
-        from . import hypothesis as hyp, reasoning
-        from .modiqo_play import readings_without
-
         analysis.hypothesis_result = hyp.evaluate(
-            reasoning.find_hypothesis(tested), entry["post_id"], product_name, channel,
-            [m.get("post_id") for m in readings_without(channel, checkpoint, tested,
-                                                         exclude_post_ids={entry.get("post_id")})],
+            tested_hypothesis, entry["post_id"], product_name, channel,
+            hyp.comparison_posts(entry["post_id"], product_name, channel, checkpoint, tested),
             entry.get("environment"), checkpoint)
         if analysis.hypothesis_result is None:
             audit.log_event("analysis", "tested_hypothesis.missing", post_id=entry.get("post_id"),
@@ -989,6 +1004,11 @@ def _image_note(entry: dict[str, Any]) -> str:
     """One line on the post's image for the text advisors, from Gemma's
     read. Posts drafted before 2026-10-22 have none stored: their saved
     image is looked at now (one image-model call) instead."""
+    # 2026-10-30: the description comes from the draft, so it survives a post
+    # that went out without the image (#13-15). What was published decides.
+    env = entry.get("environment") or {}
+    if env.get("has_image") is False and not env.get("has_video"):
+        return "The post had no image."
     desc = entry.get("image_description")
     if not desc:
         queued = draft_queue._latest_entries().get(entry.get("post_id", "")) or {}
@@ -1133,11 +1153,20 @@ def apply_analysis_decision(queue_entry: dict[str, Any], confirmed: bool, note: 
             f"{queue_entry.get('post_id')} @ {queue_entry.get('checkpoint')}: "
             + analysis_queue.STALE_REASON
         )
+    # 2026-10-30: a second click on a page holding the old entry, or a
+    # checkpoint another path already finished, must not write history twice.
+    checkpoint = queue_entry["checkpoint"]
+    post_id = queue_entry["post_id"]
+    done = (tracking_review._latest_entries().get(post_id) or {}).get("checkpoints_done") or {}
+    if checkpoint in done or analysis_queue.find_pending_for(post_id, checkpoint) is None:
+        if analysis_queue.find_pending_for(post_id, checkpoint) is not None:
+            analysis_queue.update_entry(post_id, checkpoint, status="already_recorded")
+        print(f"[skip] {post_id} @ {checkpoint} has already been decided; nothing recorded twice.")
+        return
     analysis = AnalysisResult(**queue_entry["analysis"])
     analysis.human_confirmed = confirmed
     analysis.human_note = note
     entry = queue_entry["entry"]
-    checkpoint = queue_entry["checkpoint"]
     metrics = queue_entry["metrics"]
     next_strategy = queue_entry["recommendation"]
     _finalize_analysis(entry, checkpoint, metrics, analysis, next_strategy,
@@ -1228,9 +1257,8 @@ def run_review(checkpoint: str = "24h", terminal: bool = False) -> int:
     """`contentmaster review` — scans plays/_tracking_review.jsonl for
     posts due at this checkpoint (past CHECKPOINT_MIN_AGE and not already
     processed at this tier — no upper window, a late run still processes
-    them). Manually triggered for now (or from the user's own launchd/
-    cron) — real automatic in-process scheduling is still TBD, see
-    docs/SCHEDULE.md Phase 9.
+    them). Run by hand; `review --schedule` makes the analyses daily without
+    opening anything (scheduler.review_due), and this then opens them.
 
     `terminal` (2026-09-18, Phase 5 extension, /grill-me design session —
     see docs/LOG.md): default False, meaning each due post's analysis is
@@ -1249,8 +1277,46 @@ def run_review(checkpoint: str = "24h", terminal: bool = False) -> int:
     due = tracking_review.find_due(checkpoint)
     if not due:
         print(f"No posts due for the {checkpoint} checkpoint.")
+        # 2026-10-30: a scheduled review can leave a 7d or 30d analysis
+        # waiting, and the notification says to run plain `review`.
+        waiting = analysis_queue.find_pending()
+        failed = [e for e in draft_queue.find_reviewable() if e["status"] == "publish_failed"]
+        if (waiting or failed) and not terminal:
+            print(f"Waiting for you: {len(waiting)} analysis(es), {len(failed)} failed publish(es).")
+            launch_streamlit()
         return 0
     print(f"{len(due)} post(s) due for the {checkpoint} checkpoint.")
+    try:
+        n_queued, n_already_pending = _queue_due(checkpoint, terminal=terminal)
+    except warehouse.WarehouseFailed as exc:
+        print(f"\n[stopped] Could not update post history, so nothing more was analysed: {exc}\n"
+              "The posts stay due. Fix this and run `contentmaster review` again.")
+        return 1
+    if n_queued or n_already_pending:
+        parts = []
+        if n_queued:
+            parts.append(f"{n_queued} post(s)' analysis queued for review")
+        if n_already_pending:
+            parts.append(f"{n_already_pending} already waiting from an earlier run")
+        print("\n" + "; ".join(parts) + ".")
+        launch_streamlit()
+    return 0
+
+
+def _due_unqueued(checkpoint: str) -> list[dict[str, Any]]:
+    """Due posts that still need an analysis made. A stale queued one does."""
+    out = []
+    for entry in tracking_review.find_due(checkpoint):
+        pending = analysis_queue.find_pending_for(entry["post_id"], checkpoint)
+        if pending is None or analysis_queue.is_stale(pending):
+            out.append(entry)
+    return out
+
+
+def _queue_due(checkpoint: str, terminal: bool = False, limit: int | None = None) -> tuple[int, int]:
+    """Analyse the posts due at this checkpoint, up to `limit` new analyses.
+    Returns (queued, already pending). Opens nothing, so the scheduled review
+    can use it with nobody at the screen."""
     n_queued = 0
     # 2026-09-21 (real usage bug): counted separately from n_queued, and
     # the browser now opens for either. Before this, a run where EVERY due
@@ -1260,7 +1326,9 @@ def run_review(checkpoint: str = "24h", terminal: bool = False) -> int:
     # shuts itself down when idle (see streamlit_app.py), so "it was still
     # up from last time" is not a safe assumption either.
     n_already_pending = 0
-    for entry in due:
+    for entry in tracking_review.find_due(checkpoint):
+        if limit is not None and n_queued >= limit:
+            break
         pending = analysis_queue.find_pending_for(entry["post_id"], checkpoint)
         if pending is not None and not analysis_queue.is_stale(pending):
             n_already_pending += 1
@@ -1291,15 +1359,7 @@ def run_review(checkpoint: str = "24h", terminal: bool = False) -> int:
         except ReviewInterrupted:
             print("\n[stopped] Review interrupted — remaining due post(s) skipped this run.")
             break
-    if n_queued or n_already_pending:
-        parts = []
-        if n_queued:
-            parts.append(f"{n_queued} post(s)' analysis queued for review")
-        if n_already_pending:
-            parts.append(f"{n_already_pending} already waiting from an earlier run")
-        print("\n" + "; ".join(parts) + ".")
-        launch_streamlit()
-    return 0
+    return n_queued, n_already_pending
 
 
 def _extract_topics_and_generate(
@@ -1373,12 +1433,23 @@ def _fallback_context(whitepaper_path: str, product_name: str, features: list[st
     return "\n\n".join(parts)
 
 
+def _nothing_to_attach(product_name: str) -> bool:
+    """"Only my files" with an empty folder is a run with no images, recorded
+    exactly as --no-image is. Both review surfaces ask this."""
+    if product_assets.may_generate(product_name) or product_assets.available(product_name):
+        return False
+    print(f"[image] Set to use only your own files, and {product_assets.product_dir(product_name)} "
+          "has none — these drafts will have no image.")
+    return True
+
+
 def _run_terminal(product_name: str, channel: str, drafts: list[dict[str, Any]],
                    no_image: bool = False) -> None:
     """The original review flow, unchanged: text review then image review
     then publish then queue, one draft at a time, right here in the
     terminal.
     """
+    no_image = no_image or _nothing_to_attach(product_name)
     results: list[dict[str, Any]] = []
     for i, draft in enumerate(drafts, start=1):
         print(f"\n########## Draft {i} of {len(drafts)} ##########")
@@ -1474,6 +1545,7 @@ def _run_streamlit(product_name: str, channel: str, drafts: list[dict[str, Any]]
     opened automatically. No inline review here at all, unlike the
     terminal path.
     """
+    no_image = no_image or _nothing_to_attach(product_name)
     out_dir = settings.data_root / "generated_images"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1495,11 +1567,13 @@ def _run_streamlit(product_name: str, channel: str, drafts: list[dict[str, Any]]
             image_bytes, source_path = supplied
             audit.log_event("image", "supplied", draft_id=draft["id"], file=source_path.name)
             print(f"[image] Using your own file {source_path.name} instead of generating one.")
-        elif not no_image:
+        elif not no_image and product_assets.may_generate(product_name):
             prompt = image_generator.build_image_prompt(
                 draft["text"], subject_hint=draft.get("brief", ""), product=product_name,
                 category=topic_index.load_category(product_name))
             image_bytes = image_generator.generate_image(prompt)
+        elif not no_image:
+            image_bytes = None
         image_path = None
         if image_bytes:
             # Named for what it actually is. Cloudflare's FLUX returns
@@ -1896,6 +1970,10 @@ def run_video(whitepaper_path: str, channel: str = "bluesky", product_name: str 
     audit.log_event("pipeline", "video.start", whitepaper=whitepaper_path, channel=channel)
     product_name = _resolve_product_name(product_name, whitepaper_path)
     features = features or []
+    if not product_assets.may_generate(product_name):
+        print("[error] A video is made from generated images, and this product is set to use only "
+              "your own files. Change it with `contentmaster images --source auto`.")
+        return 1
 
     # Same generation path as `run()` — the text half of a video post is
     # not a different problem, so it must not be a second implementation.

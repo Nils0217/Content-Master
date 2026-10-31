@@ -42,7 +42,7 @@ print("2. 排程之後才核准的貼文,自動排到同一個時間,不用再�
 # --- 時間到才發;發出去的記錄晚了多久 ---
 sent = []
 def fake_publish(draft, text, image=None, image_alt="", video=None, video_alt="", original_text=None,
-                 acknowledged=False):
+                 acknowledged=False, check_first=False):
     assert acknowledged is True, "核准時已經檢查過,排程發佈要帶 acknowledged"
     sent.append((draft["id"], text))
     return {**draft, "text": text, "status": "published", "post_ref": f"at://{draft['id']}"}
@@ -63,7 +63,7 @@ print("3. 只發時間已到的;Mac 睡著錯過的醒來補發,記下晚了幾�
 # --- 發佈失敗:網路問題留著下次再試;內容問題標失敗 ---
 def failing(kind, retry):
     def f(*a, **k):
-        raise pipeline.PublishFailed(types.SimpleNamespace(kind=kind, reason="x", retry_unchanged=retry,
+        raise pipeline.PublishFailed(types.SimpleNamespace(kind=kind, reason="x", retry_unchanged=retry, uncertain=False,
                                                            explain=lambda: "x"), "id")
     return f
 wed_evening = datetime(2026, 10, 28, 19, 0).astimezone()
@@ -74,9 +74,10 @@ assert scheduler.publish_due(wed_evening) == 0 and posts.get(ids["2026-10-28"])[
 print("4. 網路 / 流量限制:留在排程裡,下次醒來再試;平台拒絕內容:標成失敗,不會一直重試 ✅")
 
 # --- 同時跑兩次,只有一個會發 ---
-scheduler.LOCK_PATH.write_text(str(os.getpid()))
+assert scheduler._take_lock()                                            # 另一個正在跑的發佈
 assert scheduler.publish_due(wed_evening) == 0
-scheduler.LOCK_PATH.write_text("999999")                                 # 死掉的舊鎖
+scheduler._release_lock()
+scheduler.LOCK_PATH.write_text("999999")                                 # 死掉的舊鎖留下的檔案不算
 pipeline.step5_publish = fake_publish
 assert scheduler.publish_due(datetime(2026, 10, 29, 19, 0).astimezone()) == 1
 print("5. 同時跑兩個發佈:只有一個會發;程序死掉留下的舊鎖不會卡住 ✅")

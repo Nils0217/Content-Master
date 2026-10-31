@@ -30,6 +30,7 @@ whole record here (rather than editing a line in place) keeps the same
 """
 from __future__ import annotations
 
+import fcntl
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -38,10 +39,7 @@ from .config import settings
 
 TRACKING_PATH = settings.data_root / "plays" / "_tracking_review.jsonl"
 
-# How long after `ts` each checkpoint becomes due. Only "24h" has a
-# processing function wired up in pipeline.py yet (see docs/SCHEDULE.md
-# Phase 9 — 24h was deliberately built first, to prove the mechanism
-# works in production before waiting a full week for 7d).
+# How long after `ts` each checkpoint becomes due.
 CHECKPOINT_MIN_AGE: dict[str, timedelta] = {
     "24h": timedelta(hours=24),
     "7d": timedelta(days=7),
@@ -171,10 +169,30 @@ def mark_deleted(record: dict[str, Any], detail: str = "") -> dict[str, Any]:
     failed metrics pull was caught as a generic platform error and
     answered with metrics_store.mock_metrics(), i.e. invented numbers.
     """
-    updated = {**record, "deleted_at": _now_iso()}
-    if detail:
-        updated["deleted_detail"] = detail
+    def stamp(current: dict[str, Any]) -> dict[str, Any]:
+        updated = {**current, "deleted_at": current.get("deleted_at") or _now_iso()}
+        if detail:
+            updated["deleted_detail"] = detail
+        return updated
+
+    return _merge_into_latest(record, stamp)
+
+
+def _merge_into_latest(record: dict[str, Any], change: Any) -> dict[str, Any]:
+    """Apply `change` to the post's CURRENT row and append the result, under
+    a lock. `change` may return None to write nothing.
+
+    2026-10-30 (code review): callers hold snapshots, and a queued analysis
+    can hold one for days. Appending a snapshot as the new state erased
+    every later checkpoint and could bring a deleted post back to polling.
+    """
+    TRACKING_PATH.parent.mkdir(parents=True, exist_ok=True)
     with TRACKING_PATH.open("a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        current = {**record, **(_latest_entries().get(record.get("post_id")) or {})}
+        updated = change(current)
+        if updated is None:
+            return current
         fh.write(json.dumps(updated, default=str) + "\n")
     return updated
 
@@ -243,9 +261,10 @@ def mark_checkpoint_done(record: dict[str, Any], checkpoint: str) -> None:
     `contentmaster review` command just happened to be run late for, and
     correct for the deviation instead of assuming it was on-time.
     """
-    updated = {**record}
-    checkpoints_done = dict(updated.get("checkpoints_done") or {})
-    checkpoints_done[checkpoint] = _now_iso()
-    updated["checkpoints_done"] = checkpoints_done
-    with TRACKING_PATH.open("a") as fh:
-        fh.write(json.dumps(updated, default=str) + "\n")
+    def stamp(current: dict[str, Any]) -> dict[str, Any] | None:
+        done = dict(current.get("checkpoints_done") or {})
+        if checkpoint in done:
+            return None
+        return {**current, "checkpoints_done": {**done, checkpoint: _now_iso()}}
+
+    _merge_into_latest(record, stamp)

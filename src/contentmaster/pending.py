@@ -56,7 +56,8 @@ def summary_lines() -> list[str]:
         for e in failed:
             kinds[e.get("failure_kind", "unknown")] = kinds.get(e.get("failure_kind", "unknown"), 0) + 1
         detail = ", ".join(f"{n} {k}" for k, n in sorted(kinds.items()))
-        lines.append(f"{len(failed)} draft(s) failed to publish and are still unresolved ({detail}).")
+        lines.append(f"{len(failed)} draft(s) failed to publish and are still unresolved ({detail}). "
+                     "`contentmaster review` opens them to retry or reject.")
     waiting = awaiting_decision()
     if waiting:
         lines.append(f"{len(waiting)} analysis/analyses waiting for your confirm/disagree.")
@@ -121,6 +122,11 @@ def print_status() -> None:
     due = tracking_review.find_due("24h")
     if due:
         print(f"  {len(due)} due for a 24h checkpoint — run `contentmaster review`.")
+    from .scheduler import REVIEW_WAKE_LIMIT, review_schedule
+
+    at = review_schedule()
+    print(f"\nAUTOMATIC REVIEW: daily at {at}, up to {REVIEW_WAKE_LIMIT} post(s)" if at
+          else "\nAUTOMATIC REVIEW: off (turn on with `contentmaster review --schedule`)")
 
     from .error_index import recurring_errors
 

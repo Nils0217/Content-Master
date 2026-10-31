@@ -268,24 +268,24 @@ from contentmaster import metrics_store, posts, clusters
 from contentmaster import stickiness as stk
 from datetime import date
 Hl = {"id": "hyp-L", "test": "open with a question", "watch": hyp.WATCH_FIXED}
-def published(pid, when, engagers):
-    posts.register(pid, "Fluffy roommate", "bluesky", cluster_id=1, kind="cluster", experiment=False)
+def published(pid, when, engagers, experiment=False):
+    posts.register(pid, "Fluffy roommate", "bluesky", cluster_id=1, kind="cluster", experiment=experiment)
     posts.update(pid, status="published", published_at=when)
     if engagers is not None:
-        metrics_store.write_metrics(pid, "bluesky", {"like_count": len(engagers),
+        metrics_store.write_metrics(pid, "bluesky", {"like_count": len(engagers), "checkpoint": "7d",
             "engagers": {"likers": sorted(engagers), "reposters": [], "repliers": []}})
 clusters.create("Fluffy roommate", "bluesky", date(2026, 10, 12), Hl, None)
 published("old1", "2026-10-12T18:00:00+00:00", {"A", "B"})
 published("old2", "2026-10-13T18:00:00+00:00", {"C"})
-published("cmp1", "2026-10-14T18:00:00+00:00", {"A"})          # 1/1 回頭 → 100%
-published("cmp2", "2026-10-15T18:00:00+00:00", {"E"})          # 0/1 → 0%
+published("cmp1", "2026-10-14T18:00:00+00:00", {"A"}, experiment=True)   # 1/1 回頭 → 100%
+published("cmp2", "2026-10-15T18:00:00+00:00", {"E"}, experiment=True)   # 0/1 → 0%
 published("hit", "2026-10-16T18:00:00+00:00", {"A", "B"})      # 2/2 → 100%
 published("miss", "2026-10-16T19:00:00+00:00", {"Y", "Z"})     # 0/2 → 0%
 published("nobody", "2026-10-17T18:00:00+00:00", set())
 published("noread", "2026-10-17T19:00:00+00:00", None)
 assert stk.stickiness("hit", "Fluffy roommate", "bluesky") == {"value": 1.0, "engagers": 2, "returning": 2,
                                                                "known": True, "unknown_prior": 0}
-for snap in ((0, "2026-10-12T17:00:00+00:00"), (2, "2026-10-15T00:00:00+00:00"), (3, "2026-10-19T09:00:00+00:00")):
+for snap in ((0, "2026-10-12T17:00:00+00:00"), (2, "2026-10-15T00:00:00+00:00"), (3, "2026-10-18T09:00:00+00:00")):
     with stk.ACCOUNT_PATH.open("a") as fh:
         fh.write(json.dumps({"ts": snap[1], "channel": "bluesky", "followers": snap[0]}) + "\n")
 r = hyp.evaluate(Hl, "hit", "Fluffy roommate", "bluesky", ["cmp1", "cmp2"], env, "7d")

@@ -34,7 +34,7 @@ from typing import Any
 
 import requests
 
-from . import audit, hypothesis as hyp, reasoning
+from . import audit, hypothesis as hyp, platform_rules, reasoning
 from .analysis import AnalysisResult
 
 _ENDPOINT = os.environ.get("LLM_IMPROVE_ENDPOINT", "http://localhost:11434/v1/chat/completions")
@@ -74,16 +74,20 @@ _MODEL_B = os.environ.get("DISCUSS_MODEL_B", "gemma3:4b")
 # whichever advisor it resembles.
 _JUDGE_MODEL = os.environ.get("DISCUSS_JUDGE_MODEL", "qwen3:4b")
 
-# 2026-09-18 (docs/LOG.md — real design review): off by default. Without
-# DISCUSS_JUDGE_MODEL set, the judge is the same model as Advisor A, so the
-# "third pass" this module's own docstring describes was really "model A
-# judges its own proposal against mistral's", not genuine third-party
-# judgment — misleading enough that a synthesized "final strategy" isn't
-# trustworthy on its own right now. Left in and easy to flip back on
-# (DISCUSS_JUDGE_ENABLED=1) once a real third-party model is wired up for
-# DISCUSS_JUDGE_MODEL; until then synthesize_strategy() returns both raw
-# proposals, labeled, instead of a fake merge.
+# On by default since qwen3:4b became a third family (see the module
+# docstring). DISCUSS_JUDGE_ENABLED=0 returns both raw proposals, labeled,
+# instead of a pick. It was off from 2026-09-18 to 2026-09-25, when the judge
+# defaulted to Advisor A's own model.
 _JUDGE_ENABLED = os.environ.get("DISCUSS_JUDGE_ENABLED", "1") == "1"
+
+
+def model_server_up() -> bool:
+    """Is Ollama answering at all? Asked before unattended work, because an
+    analysis whose advisors all failed still gets queued, with nothing in it."""
+    try:
+        return requests.get(_ENDPOINT.split("/v1/")[0] + "/api/tags", timeout=5).ok
+    except requests.RequestException:
+        return False
 
 
 def _complete(model: str, prompt: str, timeout: int = 90, **log: Any) -> str | None:
@@ -139,6 +143,7 @@ def _proposal_prompt(
 ) -> str:
     prompt = f"You're advising on the next post for '{product_name}' on {channel}.\n\n"
     prompt += _grounding(product_name, post_text, category, topic_names, image_note)
+    prompt += platform_rules.prompt_block(channel)
     if analysis.has_baseline:
         prompt += (f"Real performance analysis (not a guess): {analysis.evidence}\n"
                    f"Trend: {analysis.trend}.")

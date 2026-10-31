@@ -228,7 +228,8 @@ def comparable_history(channel: str, checkpoint: str,
 
 
 def readings_without(channel: str, checkpoint: str, hypothesis_id: str,
-                     exclude_post_ids: set[str] | None = None) -> list[dict[str, Any]]:
+                     exclude_post_ids: set[str] | None = None,
+                     product: str | None = None) -> list[dict[str, Any]]:
     """Raw counts for posts at this checkpoint that did NOT test
     `hypothesis_id` — what a test's watched number is set beside
     (hypothesis.evaluate). Same channel/tier filtering as
@@ -246,6 +247,8 @@ def readings_without(channel: str, checkpoint: str, hypothesis_id: str,
             if record.get("channel") != channel or record.get("checkpoint") != checkpoint:
                 continue
             if record.get("tests_hypothesis_id") == hypothesis_id:
+                continue
+            if product and record.get("product") != product:
                 continue
             metrics = record.get("metrics") or {}
             pid = record.get("post_id") or metrics.get("post_id")

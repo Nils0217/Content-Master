@@ -79,7 +79,101 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_review(args: argparse.Namespace) -> int:
+    from . import scheduler
+
+    if args.unschedule:
+        print(f"Mac: {scheduler.unschedule_review()}")
+        return 0
+    if args.schedule:
+        try:
+            print(f"Mac: {scheduler.schedule_review(args.schedule)}")
+        except ValueError as e:
+            print(f"[error] {e}")
+            return 1
+        print("Analyses are made at that time and wait for you. Nothing is confirmed or published "
+              "for you; a notification says when one is ready.")
+        return 0
     return _pipeline.run_review(checkpoint=args.checkpoint, terminal=args.terminal)
+
+
+def _cmd_review_due(args: argparse.Namespace) -> int:
+    from . import scheduler
+
+    scheduler.review_due()
+    return 0
+
+
+def _cmd_images(args: argparse.Namespace) -> int:
+    from . import product_assets, product_registry
+
+    names = sorted(product_registry.known_names(),
+                   key=lambda n: product_registry.lookup(n).get("last_used", ""))
+    product = args.product_name or (names[-1] if names else None)
+    if product is None:
+        print("[error] No product yet. Pass --product-name.")
+        return 1
+    if args.source:
+        product_assets.set_image_source(product, args.source)
+    print(f"{product}: {product_assets.IMAGE_SOURCES[product_assets.image_source(product)]}. "
+          f"Your files: {product_assets.describe(product)['count']}.")
+    return 0
+
+
+def _cmd_errors(args: argparse.Namespace) -> int:
+    from . import error_index
+
+    rows = error_index.report(args.min_count)
+    picked = args.propose or args.accept or args.reject
+    if picked:
+        if not 1 <= picked <= len(rows):
+            print(f"[error] There is no error number {picked}; the list has {len(rows)}.")
+            return 1
+        sig = rows[picked - 1]["signature"]
+        try:
+            if args.propose:
+                print(f"Asking {error_index.FIX_MODEL}; this uses Ollama and can take a few minutes.")
+                if error_index.propose_fix(sig, args.min_count) is None:
+                    print("[error] The model did not answer. Why is in the audit log (model_error).")
+                    return 1
+            else:
+                error_index.decide_proposal(sig, bool(args.accept), args.note)
+        except KeyError as e:
+            print(f"[error] {e.args[0]}")
+            return 1
+        rows = error_index.report(args.min_count)
+    if not rows:
+        print("No errors recorded.")
+    for i, r in enumerate(rows, start=1):
+        print(f"{i:>3}. {r['count']}x  {r['signature']}")
+        print(f"     first {r['first_seen'][:16]}, last {r['last_seen'][:16]}"
+              + (f", kind {r['kind']}" if r["kind"] else ""))
+        for heading, _ in r["known"]:
+            print(f"     past write-up: {heading}")
+        if r["proposal"]:
+            print(f"     proposal ({r['proposal']['status']}, {r['proposal']['model']}):")
+            print("       " + r["proposal"]["raw"].replace("\n", "\n       "))
+    return 0
+
+
+def _cmd_rules(args: argparse.Namespace) -> int:
+    from . import platform_rules
+
+    try:
+        if args.add:
+            r = platform_rules.add(args.platform, args.add, args.evidence)
+            print(f"Added {r['id']}.")
+        if args.retire:
+            platform_rules.retire(args.retire)
+            print(f"Retired {args.retire}.")
+    except (ValueError, KeyError) as e:
+        print(f"[error] {e.args[0]}")
+        return 1
+    rules = platform_rules.active(args.platform if not args.add else None)
+    if not rules:
+        print("No platform rules.")
+    for r in rules:
+        print(f"  {r['id']}  {r['platform']}: {r['rule']}\n            evidence: {r['evidence']}")
+    return 0
 
 
 def _cmd_video(args: argparse.Namespace) -> int:
@@ -323,9 +417,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--features", nargs="+", default=None, metavar="FEATURE",
         help="What this product does, e.g. --features \"quiet indoors\" \"needs no walks\". Used to "
-             "ground generation when there is no topic index yet, and by the last-resort "
-             "template. Omit to use the built-in placeholder list — which is almost certainly "
-             "not about YOUR product (it describes this pipeline itself).",
+             "ground generation when there is no topic index yet. If nothing can ground a draft, "
+             "the run produces no drafts rather than inventing them.",
     )
     p_run.add_argument(
         "--posts", type=int, default=1,
@@ -371,8 +464,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_review.add_argument(
         "--checkpoint", default="24h", choices=["24h", "7d", "30d"],
-        help="Which checkpoint tier to process (default: 24h — the only one wired up so far, "
-             "see docs/SCHEDULE.md Phase 9)",
+        help="Which checkpoint tier to process (default: 24h)",
     )
     p_review.add_argument(
         "--terminal", action="store_true",
@@ -380,7 +472,43 @@ def build_parser() -> argparse.ArgumentParser:
              "(default: opens a browser page for review, see streamlit_app.py's Analysis "
              "review tab)",
     )
+    p_review.add_argument(
+        "--schedule", nargs="?", const="18:30", default=None, metavar="HH:MM",
+        help="Have the Mac analyse whatever is due once a day at this time (default 18:30), up to "
+             "three posts a day. You still confirm each one here or in the browser.",
+    )
+    p_review.add_argument("--unschedule", action="store_true", help="Turn the daily review off")
     p_review.set_defaults(func=_cmd_review)
+
+    p_review_due = sub.add_parser(
+        "review-due", help="Analyse what is due, without opening anything (what the Mac runs)")
+    p_review_due.set_defaults(func=_cmd_review_due)
+
+    p_images = sub.add_parser(
+        "images", help="Where a product's images come from on the next run (same as the review page)")
+    p_images.add_argument("--source", choices=["auto", "generate", "supplied"], default=None,
+                          help="auto: your files if any, else generate. generate: always generate. "
+                               "supplied: only your files, never call the image model.")
+    p_images.add_argument("--product-name", default=None, help="Default: the most recently used product")
+    p_images.set_defaults(func=_cmd_images)
+
+    p_errors = sub.add_parser(
+        "errors", help="Every recorded error, with past write-ups and any proposed fix "
+                       "(same list as the review page's Errors tab)")
+    p_errors.add_argument("--min-count", type=int, default=1, help="Only errors seen this many times")
+    p_errors.add_argument("--propose", type=int, metavar="N", help="Ask a local model for a fix to error N")
+    p_errors.add_argument("--accept", type=int, metavar="N", help="Accept the proposal on error N")
+    p_errors.add_argument("--reject", type=int, metavar="N", help="Reject the proposal on error N")
+    p_errors.add_argument("--note", default="", help="Your note on an accept or reject")
+    p_errors.set_defaults(func=_cmd_errors)
+
+    p_rules = sub.add_parser(
+        "rules", help="What is verified about a platform, for every product on it. Only people add these.")
+    p_rules.add_argument("--platform", default=None, help="e.g. bluesky")
+    p_rules.add_argument("--add", default=None, metavar="RULE", help="Add a rule; needs --platform and --evidence")
+    p_rules.add_argument("--evidence", default="", help="What shows this holds for the platform, not one product")
+    p_rules.add_argument("--retire", default=None, metavar="ID", help="Stop using a rule; it stays on record")
+    p_rules.set_defaults(func=_cmd_rules)
 
     p_refresh = sub.add_parser(
         "refresh",

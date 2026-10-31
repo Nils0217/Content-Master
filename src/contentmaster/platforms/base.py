@@ -43,6 +43,16 @@ class PlatformAPIError(RuntimeError):
     """
 
 
+class PlatformNetworkError(PlatformAPIError):
+    """The connection failed. `may_have_sent` is False only when the request
+    certainly never left, such as during login: after a send has started, a
+    lost connection says nothing about whether the post went through."""
+
+    def __init__(self, message: str, may_have_sent: bool = True):
+        super().__init__(message)
+        self.may_have_sent = may_have_sent
+
+
 class PlatformAuthError(PlatformAPIError):
     """Login/authentication with a platform failed."""
 
@@ -256,6 +266,13 @@ class Platform(ABC):
         which is recorded as unknown rather than zero.
         """
         return {}
+
+    def find_published(self, text: str) -> dict[str, Any] | None:
+        """This account's recent post with exactly this text, in the shape
+        publish_post returns, or None. Asked before retrying a send that may
+        have gone through. An adapter without it raises, because answering
+        None would allow a duplicate."""
+        raise PlatformAPIError(f"{self.name} cannot check whether a post already went out.")
 
     def publish_video(self, text: str, video: bytes, video_alt: str = "") -> dict[str, Any]:
         """Post with a video attached. Default: not supported, which is a

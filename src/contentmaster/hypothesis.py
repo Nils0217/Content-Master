@@ -24,6 +24,7 @@ drafting prompt share one definition:
 """
 from __future__ import annotations
 
+from datetime import date, datetime, time, timedelta
 import re
 import uuid
 from typing import Any
@@ -205,6 +206,30 @@ def review_view(h: dict[str, Any] | None, row: dict[str, Any] | None) -> dict[st
 MIN_COMPARISON_POSTS = 2
 
 
+def week_window(week_start: str) -> tuple[str, str]:
+    """A cluster's week: Monday local midnight up to next Monday local midnight."""
+    monday = datetime.combine(date.fromisoformat(week_start), time.min)
+    return monday.astimezone().isoformat(), (monday + timedelta(days=7)).astimezone().isoformat()
+
+
+def comparison_posts(post_id: str, product: str, channel: str, checkpoint: str,
+                     hypothesis_id: str) -> list[str]:
+    """What a test is set beside. A cluster post: its own week's published
+    experiment posts, which deliberately did not make the change (2026-10-30,
+    code review: this could pick up old weeks, extras and other products).
+    Until enough of them have a reading the outcome stays `no_comparison`.
+    A post outside the cluster design: other posts of the same product."""
+    from . import posts
+    from .modiqo_play import readings_without
+
+    row = posts.get(post_id) or {}
+    if row.get("kind") == "cluster" and (row.get("cluster_id") or 0) > 0:
+        return [r["post_id"] for r in posts.in_cluster(product, channel, row["cluster_id"], kind="cluster")
+                if r.get("experiment") and r["status"] == "published" and r["post_id"] != post_id]
+    return [m.get("post_id") for m in readings_without(channel, checkpoint, hypothesis_id,
+                                                       exclude_post_ids={post_id}, product=product)]
+
+
 def evaluate(h: dict[str, Any] | None, post_id: str, product: str, channel: str,
              comparison_post_ids: list[str], environment: dict[str, Any] | None,
              checkpoint: str) -> dict[str, Any] | None:
@@ -212,7 +237,7 @@ def evaluate(h: dict[str, Any] | None, post_id: str, product: str, channel: str,
 
     2026-10-22: read on the two fixed numbers (WATCH_FIXED). Stickiness of
     the testing post vs the median stickiness of posts that did not test it
-    (`comparison_post_ids`, from modiqo_play.readings_without). Follower
+    (`comparison_post_ids`, from comparison_posts), all read at this checkpoint. Follower
     change is the week's, for the cluster the post belongs to — reported
     beside the comparison, never split onto this one post.
     """
@@ -221,8 +246,8 @@ def evaluate(h: dict[str, Any] | None, post_id: str, product: str, channel: str,
     from . import clusters, posts
     from .stickiness import follower_change, stickiness
 
-    mine = stickiness(post_id, product, channel)
-    others = [v for v in (stickiness(pid, product, channel)["value"] for pid in comparison_post_ids)
+    mine = stickiness(post_id, product, channel, checkpoint)
+    others = [v for v in (stickiness(pid, product, channel, checkpoint)["value"] for pid in comparison_post_ids)
               if v is not None]
     result: dict[str, Any] = {
         "hypothesis_id": h.get("id"), "test": h.get("test", ""), "watch": WATCH_FIXED,
@@ -233,10 +258,7 @@ def evaluate(h: dict[str, Any] | None, post_id: str, product: str, channel: str,
     row = posts.get(post_id) or {}
     c = clusters.get(product, channel, row.get("cluster_id") or 0) if row.get("cluster_id") else None
     if c and c.get("week_start"):
-        from datetime import date, timedelta
-        start = date.fromisoformat(c["week_start"])
-        result["follower_change"] = follower_change(
-            channel, start.isoformat(), (start + timedelta(days=8)).isoformat())
+        result["follower_change"] = follower_change(channel, *week_window(c["week_start"]))
     if not mine["known"]:
         result["outcome"] = "unknown"           # no reading could ask who engaged
     elif mine["value"] is None:

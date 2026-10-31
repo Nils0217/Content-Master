@@ -22,6 +22,7 @@ tests never change the real Mac.
 """
 from __future__ import annotations
 
+import fcntl
 import os
 import plistlib
 import subprocess
@@ -30,12 +31,23 @@ from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
-from . import audit, posts
+from . import audit, posts, warehouse
 from .config import settings
 
 AGENT_LABEL = "com.contentmaster.publish"
 AGENT_PATH = Path.home() / "Library" / "LaunchAgents" / f"{AGENT_LABEL}.plist"
 LOCK_PATH = settings.data_root / "plays" / ".publish.lock"
+
+REVIEW_AGENT_LABEL = "com.contentmaster.review"
+REVIEW_AGENT_PATH = Path.home() / "Library" / "LaunchAgents" / f"{REVIEW_AGENT_LABEL}.plist"
+REVIEW_LOCK_PATH = settings.data_root / "plays" / ".review.lock"
+# After the usual 18:00 post, so publishing and analysing do not overlap.
+REVIEW_DEFAULT_TIME = "18:30"
+REVIEW_TIERS = ("24h", "7d", "30d")
+# Each analysis is three model calls on an 8GB machine.
+REVIEW_WAKE_LIMIT = 3
+
+_held_locks: dict[Path, Any] = {}
 
 # Half-hour steps across the waking day — the dropdown and the CLI accept these.
 TIME_CHOICES = [f"{h:02d}:{m:02d}" for h in range(6, 24) for m in (0, 30)]
@@ -142,7 +154,8 @@ def publish_due(now: datetime | None = None) -> int:
     approval with a human present (approve_for_schedule), so it is
     acknowledged here; the platform's hard limits still apply. A failure
     the platform may not repeat (network, rate limit) leaves the post
-    scheduled for the next wake; any other marks it failed.
+    scheduled for the next wake; any other marks it failed. A send that may
+    have gone through is checked against the account before it is retried.
     """
     from . import draft_queue
     from .pipeline import LABEL_KEYS, PublishFailed, step5_publish, step6_queue_for_review
@@ -160,20 +173,39 @@ def publish_due(now: datetime | None = None) -> int:
                 posts.update(r["post_id"], status="failed")
                 print(f"[publish-due] #{r.get('natural_id')} has no approved text on record — marked failed.")
                 continue
+            # A human approved this post with this file, and nobody is watching
+            # now: going out without it would not be the post they approved.
+            media = e.get("video_path") or e.get("image_path")
+            if media and not Path(media).exists():
+                reason = f"approved media not found: {media}"
+                posts.update(r["post_id"], status="failed")
+                draft_queue.update_entry(r["post_id"], status="publish_failed",
+                                         failure_kind="media_missing", failure_reason=reason)
+                audit.log_event("scheduler", "media_missing", post_id=r["post_id"],
+                                 natural_id=r.get("natural_id"), path=media)
+                print(f"[publish-due] #{r.get('natural_id')} not published — {reason} — marked failed.")
+                continue
             image = video = None
-            if e.get("video_path") and Path(e["video_path"]).exists():
-                video = Path(e["video_path"]).read_bytes()
-            elif e.get("image_path") and Path(e["image_path"]).exists():
-                image = Path(e["image_path"]).read_bytes()
-            draft = {"id": r["post_id"], "channel": e["channel"], "topic": e.get("topic", ""),
+            if e.get("video_path"):
+                video = Path(media).read_bytes()
+            elif media:
+                image = Path(media).read_bytes()
+            draft ={"id": r["post_id"], "channel": e["channel"], "topic": e.get("topic", ""),
                      "brief": e.get("brief", ""), **{k: e.get(k) for k in LABEL_KEYS if e.get(k) is not None}}
+            # Marked before sending, so a run killed mid-send is treated like a
+            # lost connection: the account is checked before anything is resent.
+            was_uncertain = bool(e.get("send_uncertain"))
+            draft_queue.update_entry(r["post_id"], send_uncertain=True)
             try:
                 published = step5_publish(draft, e["text"], image=image,
                                           image_alt=(e.get("image_description") or e.get("brief") or "")[:200],
-                                          video=video, original_text=e.get("original_text") or e["text"],
-                                          acknowledged=True)
+                                          video=video, video_alt=e.get("video_alt", ""),
+                                          original_text=e.get("original_text") or e["text"],
+                                          acknowledged=True, check_first=was_uncertain)
             except PublishFailed as err:
                 keep = err.failure.retry_unchanged
+                draft_queue.update_entry(r["post_id"], send_uncertain=err.failure.uncertain
+                                         or (was_uncertain and keep))
                 if not keep:
                     posts.update(r["post_id"], status="failed")
                     draft_queue.update_entry(r["post_id"], status="publish_failed",
@@ -184,7 +216,7 @@ def publish_due(now: datetime | None = None) -> int:
             step6_queue_for_review(e["product"], e["channel"], published,
                                    edited=bool(e.get("edited")), reviewer_note=e.get("reviewer_note", ""),
                                    labels={k: e.get(k) for k in LABEL_KEYS if e.get(k) is not None})
-            draft_queue.update_entry(r["post_id"], status="published")
+            draft_queue.update_entry(r["post_id"], status="published", send_uncertain=False)
             late = int((now - datetime.fromisoformat(r["scheduled_at"])).total_seconds() // 60)
             posts.update(r["post_id"], late_minutes=max(late, 0))
             audit.log_event("scheduler", "published", post_id=r["post_id"],
@@ -197,24 +229,83 @@ def publish_due(now: datetime | None = None) -> int:
         _release_lock()
 
 
-def _take_lock() -> bool:
-    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if LOCK_PATH.exists():
+def review_due(limit: int = REVIEW_WAKE_LIMIT) -> int:
+    """Analyse what has come due, for a human to decide later. What launchd
+    runs for `contentmaster review --schedule`.
+
+    Stops at the queue on purpose (2026-10-30): the analysis is made
+    unattended, but only a human's Confirm or Disagree finishes it, and
+    no browser opens while nobody asked for one. `limit` keeps one wake from
+    holding Ollama for the whole evening: a backlog drains over several days,
+    newest tier first. Returns how many analyses were queued.
+    """
+    from . import analysis_queue, discuss
+    from .pipeline import _due_unqueued, _queue_due
+
+    if not _take_lock(REVIEW_LOCK_PATH):
+        print("[review-due] Another review run is in progress — leaving it to that one.")
+        return 0
+    try:
+        if not any(_due_unqueued(c) for c in REVIEW_TIERS):
+            print("[review-due] Nothing new to analyse.")
+            return 0
+        if not discuss.model_server_up():
+            msg = "Scheduled review could not run: Ollama is not reachable. It will try again at the next wake."
+            print(f"[review-due] {msg}")
+            audit.log_event("scheduler", "failed", kind="review_due", reason="Ollama not reachable")
+            notify(msg)
+            return 0
+        n = 0
         try:
-            os.kill(int(LOCK_PATH.read_text().strip()), 0)
-            return False            # the other run is alive
-        except (ValueError, ProcessLookupError, PermissionError):
-            pass                    # stale lock from a run that died
-    LOCK_PATH.write_text(str(os.getpid()))
+            for checkpoint in REVIEW_TIERS:
+                n += _queue_due(checkpoint, limit=limit - n)[0]
+        except warehouse.WarehouseFailed as exc:
+            msg = "Scheduled review stopped: post history could not be updated. It will try again at the next wake."
+            print(f"[review-due] {msg} {exc}")
+            notify(msg)
+            return n
+        waiting = len(analysis_queue.find_pending())
+        audit.log_event("scheduler", "review_due", queued=n, waiting=waiting)
+        print(f"[review-due] {n} analysis(es) queued; {waiting} waiting for your decision.")
+        if n:
+            notify(f"{waiting} analysis(es) are waiting for your decision. Run: contentmaster review")
+        return n
+    finally:
+        _release_lock(REVIEW_LOCK_PATH)
+
+
+def notify(message: str) -> bool:
+    """A macOS notification. Never from an isolated data root."""
+    if settings.is_isolated_data_root:
+        return False
+    safe = message.replace("\\", "\\\\").replace('"', '\\"')
+    done = subprocess.run(
+        [os.environ.get("CONTENTMASTER_NOTIFY", "/usr/bin/osascript"), "-e",
+         f'display notification "{safe}" with title "ContentMaster"'],
+        capture_output=True, check=False)
+    return done.returncode == 0
+
+
+def _take_lock(path: Path | None = None) -> bool:
+    """An operating-system lock, held until _release_lock or until the process
+    ends, however it ends. 2026-10-30 (code review): this was "does the file
+    exist, then write it", and callers released together could all win."""
+    path = path or LOCK_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = path.open("a")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return False
+    _held_locks[path] = fh
     return True
 
 
-def _release_lock() -> None:
-    try:
-        if LOCK_PATH.read_text().strip() == str(os.getpid()):
-            LOCK_PATH.unlink()
-    except FileNotFoundError:
-        pass
+def _release_lock(path: Path | None = None) -> None:
+    fh = _held_locks.pop(path or LOCK_PATH, None)
+    if fh:
+        fh.close()
 
 
 # --- the launchd agent ---------------------------------------------------------
@@ -244,21 +335,72 @@ def sync_agent() -> str:
         return "skipped (isolated data root)"
     times = sorted({datetime.fromisoformat(r["scheduled_at"]).strftime("%H:%M")
                     for r in upcoming() if r.get("scheduled_at")})
-    uid = os.getuid()
-    subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(AGENT_PATH)],
-                   capture_output=True, check=False)
     if not times:
+        _unload_agent(AGENT_PATH)
         AGENT_PATH.unlink(missing_ok=True)
         audit.log_event("scheduler", "agent.removed")
         return "removed (nothing scheduled)"
-    AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    error = _load_agent(AGENT_PATH, agent_plist(times), times=times)
+    return f"failed to load: {error}" if error else f"wakes daily at {', '.join(times)}"
+
+
+def _unload_agent(path: Path) -> None:
+    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(path)],
+                   capture_output=True, check=False)
+
+
+def _load_agent(path: Path, plist: dict[str, Any], **log: Any) -> str:
+    """Replace the agent at `path`. Returns launchd's error, empty on success."""
+    _unload_agent(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     (settings.project_root / "logs").mkdir(exist_ok=True)
-    with AGENT_PATH.open("wb") as fh:
-        plistlib.dump(agent_plist(times), fh)
-    done = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(AGENT_PATH)],
+    with path.open("wb") as fh:
+        plistlib.dump(plist, fh)
+    done = subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(path)],
                           capture_output=True, text=True, check=False)
-    audit.log_event("scheduler", "agent.installed", times=times, returncode=done.returncode,
-                     stderr=done.stderr.strip()[:300])
-    if done.returncode != 0:
-        return f"failed to load: {done.stderr.strip()}"
-    return f"wakes daily at {', '.join(times)}"
+    audit.log_event("scheduler", "agent.installed", agent=plist["Label"], returncode=done.returncode,
+                     stderr=done.stderr.strip()[:300], **log)
+    return done.stderr.strip() if done.returncode != 0 else ""
+
+
+def review_agent_plist(hhmm: str) -> dict[str, Any]:
+    logs = settings.project_root / "logs"
+    return {
+        "Label": REVIEW_AGENT_LABEL,
+        "ProgramArguments": ["/bin/sh", str(settings.project_root / "scripts" / "review_due.sh")],
+        "WorkingDirectory": str(settings.project_root),
+        "StartCalendarInterval": [{"Hour": int(hhmm[:2]), "Minute": int(hhmm[3:])}],
+        "StandardOutPath": str(logs / "review.log"),
+        "StandardErrorPath": str(logs / "review.log"),
+        "RunAtLoad": False,
+    }
+
+
+def schedule_review(hhmm: str = REVIEW_DEFAULT_TIME) -> str:
+    """`contentmaster review --schedule`: analyse what is due once a day.
+    Same rule as sync_agent: an isolated data root never touches the Mac."""
+    if hhmm not in TIME_CHOICES:
+        raise ValueError(f"{hhmm!r} is not one of the half-hour times between 06:00 and 23:30")
+    if settings.is_isolated_data_root:
+        return "skipped (isolated data root)"
+    error = _load_agent(REVIEW_AGENT_PATH, review_agent_plist(hhmm), time=hhmm)
+    return f"failed to load: {error}" if error else f"reviews daily at {hhmm}"
+
+
+def unschedule_review() -> str:
+    if settings.is_isolated_data_root:
+        return "skipped (isolated data root)"
+    _unload_agent(REVIEW_AGENT_PATH)
+    REVIEW_AGENT_PATH.unlink(missing_ok=True)
+    audit.log_event("scheduler", "agent.removed", agent=REVIEW_AGENT_LABEL)
+    return "automatic review is off"
+
+
+def review_schedule() -> str | None:
+    """The daily review time, or None when it is off. The agent file is the
+    record, so this cannot disagree with what the Mac will actually do."""
+    if settings.is_isolated_data_root or not REVIEW_AGENT_PATH.exists():
+        return None
+    with REVIEW_AGENT_PATH.open("rb") as fh:
+        at = plistlib.load(fh)["StartCalendarInterval"][0]
+    return f"{at['Hour']:02d}:{at['Minute']:02d}"
